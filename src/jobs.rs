@@ -271,16 +271,38 @@ async fn process_job(job: Job) -> Result<()> {
         }
     }
 
-    let output_path = format!("{}/output.mp4", temp_dir);
-    info!("Output path: {}", output_path);
-
     // Build FFmpeg filter complex based on quadrant selection
     let filter_complex = build_filter_complex(&job.selection)?;
     info!("FFmpeg filter: {}", filter_complex);
 
-    info!("Starting FFmpeg...");
+    // Create the output folder on WebDAV if needed (before FFmpeg runs)
+    // job.output_path is like "processed/filename.mp4"
+    if let Some(folder_end) = job.output_path.rfind('/') {
+        let folder = &job.output_path[..folder_end];
+        if !folder.is_empty() {
+            info!("Creating WebDAV client to ensure folder exists...");
+            let dav_client = WebDavClient::new(&job.webdav_config)?;
+            info!("Ensuring folder exists: {}", folder);
+            if let Err(e) = dav_client.ensure_folder_exists(folder).await {
+                warn!("Could not create folder {}: {} (may already exist)", folder, e);
+            }
+        }
+    }
 
-    // Run FFmpeg command
+    // Build WebDAV URL for direct output from FFmpeg
+    let output_url = build_webdav_upload_url(&job.webdav_config, &job.output_path);
+    info!("FFmpeg will output directly to WebDAV: {}", job.output_path);
+    // Log URL without credentials for debugging
+    let output_url_safe = output_url.replacen(
+        &format!("://{}:{}@", encode(&job.webdav_config.username), encode(&job.webdav_config.password)),
+        "://[credentials]@",
+        1
+    );
+    info!("Output URL (redacted): {}", output_url_safe);
+
+    info!("Starting FFmpeg with direct WebDAV output...");
+
+    // Run FFmpeg command - output directly to WebDAV
     let ffmpeg_result = tokio::process::Command::new("ffmpeg")
         .arg("-y")  // Overwrite output
         .arg("-i").arg(&video_url)  // Input video
@@ -293,7 +315,8 @@ async fn process_job(job: Job) -> Result<()> {
         .arg("-preset").arg("veryfast")
         .arg("-threads").arg("0")
         .arg("-c:a").arg("copy")
-        .arg(&output_path)
+        .arg("-method").arg("PUT")  // Use HTTP PUT for WebDAV
+        .arg(&output_url)
         .output()
         .await;
 
@@ -310,36 +333,7 @@ async fn process_job(job: Job) -> Result<()> {
             }
 
             if output.status.success() {
-                info!("FFmpeg processing successful!");
-
-                // Check output file
-                match fs::metadata(&output_path) {
-                    Ok(meta) => info!("Output file size: {} bytes", meta.len()),
-                    Err(e) => error!("Failed to stat output file: {}", e),
-                }
-
-                // Upload result back to WebDAV
-                info!("Reading output file...");
-                let output_data = fs::read(&output_path)?;
-                info!("Output file read, size: {} bytes", output_data.len());
-
-                info!("Creating WebDAV client...");
-                let dav_client = WebDavClient::new(&job.webdav_config)?;
-
-                // Extract just the filename from the full path for upload
-                // output_path is like /remote.php/dav/files/jasper/VideoTest/test-2s_processed.mp4
-                // We need just the filename: test-2s_processed.mp4
-                let upload_filename = job.output_path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&job.output_path);
-
-                info!("Uploading processed video as: {} (from path: {})", upload_filename, job.output_path);
-                match dav_client.upload_file(upload_filename, output_data).await {
-                    Ok(_) => info!("Upload successful!"),
-                    Err(e) => error!("Upload FAILED: {}", e),
-                }
-
+                info!("FFmpeg processing and direct WebDAV upload successful!");
                 info!("Job {} completed successfully", job.id);
 
                 // Update job to completed via queue URL
@@ -352,6 +346,7 @@ async fn process_job(job: Job) -> Result<()> {
                 }
             } else {
                 error!("FFmpeg FAILED with exit code: {}", output.status);
+                error!("Direct WebDAV output failed - check FFmpeg stderr above for details");
 
                 if let Some(queue_url) = &job.webdav_config.queue_url {
                     let _ = update_job_status_remote(queue_url, &job.id, JobStatus::Failed, None).await;
@@ -425,6 +420,18 @@ fn build_webdav_download_url(config: &WebDavConfig, path: &str) -> String {
         path
     )
     .replacen("://", &format!("://{}:{}@", encode(&config.username), encode(&config.password)), 1)
+}
+
+fn build_webdav_upload_url(config: &WebDavConfig, output_path: &str) -> String {
+    // Build full WebDAV URL for uploading
+    // config.url is like: https://cloud.example.com/remote.php/dav/files/user/VideoTest
+    // output_path is like: processed/filename.mp4
+    // Result: https://user:pass@cloud.example.com/remote.php/dav/files/user/VideoTest/processed/filename.mp4
+
+    let base_url = config.url.trim_end_matches('/');
+    let full_url = format!("{}/{}", base_url, output_path);
+
+    full_url.replacen("://", &format!("://{}:{}@", encode(&config.username), encode(&config.password)), 1)
 }
 
 async fn update_job_status_remote(
