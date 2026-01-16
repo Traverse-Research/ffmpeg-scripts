@@ -207,45 +207,78 @@ pub async fn run_worker(queue_url: String) -> Result<()> {
 }
 
 async fn poll_queue(queue_url: &str) -> Result<Option<Job>> {
+    let url = format!("{}/jobs/pending", queue_url);
+    info!("Polling: {}", url);
+
     let client = reqwest::Client::new();
     let response = client
-        .get(format!("{}/jobs/pending", queue_url))
+        .get(&url)
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to poll queue: {}", e))?;
 
     let status = response.status();
+    info!("Poll response status: {}", status);
+
     if status.as_u16() == 204 {
         return Ok(None);
     }
 
-    let job: Job = response
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to parse job: {}", e))?;
+    let body = response.text().await.map_err(|e| anyhow::anyhow!("Failed to read response: {}", e))?;
+    info!("Poll response body: {}", body);
+
+    let job: Job = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("Failed to parse job: {} - body was: {}", e, body))?;
+    info!("Parsed job: {} with status {:?}", job.id, job.status);
     Ok(Some(job))
 }
 
 async fn process_job(job: Job) -> Result<()> {
-    info!("Processing job: {}", job.id);
+    info!("=== PROCESSING JOB START ===");
+    info!("Job ID: {}", job.id);
+    info!("Video path: {}", job.video_path);
+    info!("Output path: {}", job.output_path);
+    info!("Selection: {:?}", job.selection);
+    info!("WebDAV URL: {}", job.webdav_config.url);
+    info!("Queue URL: {:?}", job.webdav_config.queue_url);
 
     let worker_id = format!("worker-{}", uuid::Uuid::new_v4().simple());
-    let temp_dir = format!("./worker-temp-{}", worker_id);
+    let temp_dir = format!("/tmp/worker-{}", worker_id);
+    info!("Creating temp dir: {}", temp_dir);
     fs::create_dir_all(&temp_dir)?;
 
     // Build input URL with auth for direct FFmpeg streaming
     let video_url = build_webdav_download_url(&job.webdav_config, &job.video_path);
-    let _input_path = format!("{}/input.mp4", temp_dir);
+    info!("Video URL for FFmpeg: {}", video_url);
 
     // Background image path (downloaded by cloud-init to /root)
     let bg_image_path = "/root/gpc-bg.png";
+    info!("Background image path: {}", bg_image_path);
+
+    // Check if background image exists
+    if std::path::Path::new(bg_image_path).exists() {
+        info!("Background image exists at {}", bg_image_path);
+    } else {
+        error!("Background image NOT FOUND at {}", bg_image_path);
+        // Try to list /root to see what's there
+        if let Ok(entries) = std::fs::read_dir("/root") {
+            info!("Contents of /root:");
+            for entry in entries {
+                if let Ok(e) = entry {
+                    info!("  - {:?}", e.path());
+                }
+            }
+        }
+    }
 
     let output_path = format!("{}/output.mp4", temp_dir);
+    info!("Output path: {}", output_path);
 
     // Build FFmpeg filter complex based on quadrant selection
     let filter_complex = build_filter_complex(&job.selection)?;
+    info!("FFmpeg filter: {}", filter_complex);
 
-    info!("Running FFmpeg with filter: {}", filter_complex);
+    info!("Starting FFmpeg...");
 
     // Run FFmpeg command
     let ffmpeg_result = tokio::process::Command::new("ffmpeg")
@@ -266,25 +299,51 @@ async fn process_job(job: Job) -> Result<()> {
 
     match ffmpeg_result {
         Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            info!("FFmpeg exit status: {}", output.status);
+            if !stdout.is_empty() {
+                info!("FFmpeg stdout: {}", stdout);
+            }
+            if !stderr.is_empty() {
+                info!("FFmpeg stderr: {}", stderr);
+            }
+
             if output.status.success() {
-                info!("FFmpeg processing successful");
+                info!("FFmpeg processing successful!");
+
+                // Check output file
+                match fs::metadata(&output_path) {
+                    Ok(meta) => info!("Output file size: {} bytes", meta.len()),
+                    Err(e) => error!("Failed to stat output file: {}", e),
+                }
 
                 // Upload result back to WebDAV
+                info!("Reading output file...");
                 let output_data = fs::read(&output_path)?;
+                info!("Output file read, size: {} bytes", output_data.len());
+
+                info!("Creating WebDAV client...");
                 let dav_client = WebDavClient::new(&job.webdav_config)?;
 
                 info!("Uploading processed video to: {}", job.output_path);
-                dav_client.upload_file(&job.output_path, output_data).await?;
+                match dav_client.upload_file(&job.output_path, output_data).await {
+                    Ok(_) => info!("Upload successful!"),
+                    Err(e) => error!("Upload FAILED: {}", e),
+                }
 
                 info!("Job {} completed successfully", job.id);
 
                 // Update job to completed via queue URL
                 if let Some(queue_url) = &job.webdav_config.queue_url {
-                    let _ = update_job_status_remote(queue_url, &job.id, JobStatus::Completed, None).await;
+                    info!("Updating job status to completed at: {}", queue_url);
+                    match update_job_status_remote(queue_url, &job.id, JobStatus::Completed, None).await {
+                        Ok(_) => info!("Status update successful"),
+                        Err(e) => error!("Status update failed: {}", e),
+                    }
                 }
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!("FFmpeg failed: {}", stderr);
+                error!("FFmpeg FAILED with exit code: {}", output.status);
 
                 if let Some(queue_url) = &job.webdav_config.queue_url {
                     let _ = update_job_status_remote(queue_url, &job.id, JobStatus::Failed, None).await;
@@ -301,8 +360,10 @@ async fn process_job(job: Job) -> Result<()> {
     }
 
     // Cleanup temp directory
+    info!("Cleaning up temp dir: {}", temp_dir);
     let _ = fs::remove_dir_all(&temp_dir);
 
+    info!("=== PROCESSING JOB END ===");
     Ok(())
 }
 
