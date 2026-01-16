@@ -3,5 +3,36 @@ name = "ffmpeg-gpc"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["."]
+
 [dependencies]
-clap = { version = "4.5.54", features = ["derive"] }
+# CLI
+clap = { version = "4.5.54", features = ["derive", "env"] }
+
+# Web framework
+axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+http = "1.0"
+
+# WebDAV client
+reqwest_dav = { version = "0.2", features = ["rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
+bytes = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+urlencoding = "2.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP client for Hetzner API
+base64 = "0.22"

@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Processing Pipeline</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 30px;
+        }
+
+        .config-panel {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 30px;
+        }
+
+        .config-panel h2 {
+            font-size: 18px;
+            margin-bottom: 20px;
+            color: #4a9eff;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+
+        .form-group {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        .form-group.full {
+            flex: 100%;
+        }
+
+        label {
+            display: block;
+            font-size: 13px;
+            color: #888;
+            margin-bottom: 6px;
+        }
+
+        input[type="text"],
+        input[type="password"] {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1px solid #333;
+            border-radius: 6px;
+            background: #0f3460;
+            color: #eee;
+            font-size: 14px;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: #4a9eff;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #4a9eff;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #3a8eef;
+        }
+
+        .btn-secondary {
+            background: #333;
+            color: #eee;
+        }
+
+        .btn-secondary:hover {
+            background: #444;
+        }
+
+        .video-list {
+            display: grid;
+            gap: 20px;
+        }
+
+        .video-item {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr auto;
+            gap: 20px;
+            align-items: center;
+        }
+
+        .video-info h3 {
+            font-size: 14px;
+            margin-bottom: 6px;
+            color: #4a9eff;
+        }
+
+        .video-info p {
+            font-size: 12px;
+            color: #888;
+        }
+
+        .preview-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+
+        .preview-frame {
+            aspect-ratio: 16/9;
+            background: #0f3460;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .preview-frame:hover {
+            transform: scale(1.02);
+            box-shadow: 0 0 15px rgba(74, 158, 255, 0.3);
+        }
+
+        .preview-frame img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;  /* Changed from cover to contain to show full image */
+            display: block;
+        }
+
+        .preview-frame .label {
+            position: absolute;
+            bottom: 6px;
+            left: 6px;
+            background: rgba(0,0,0,0.7);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+
+        .quadrant-selector {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .quadrant-select {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .quadrant-select label {
+            font-size: 12px;
+        }
+
+        .quadrant-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+        }
+
+        .quadrant-option {
+            padding: 8px;
+            border: 2px solid #333;
+            border-radius: 6px;
+            background: #0f3460;
+            cursor: pointer;
+            text-align: center;
+            font-size: 11px;
+            transition: all 0.2s;
+        }
+
+        .quadrant-option:hover {
+            border-color: #4a9eff;
+        }
+
+        .quadrant-option.selected {
+            border-color: #4a9eff;
+            background: #4a9eff33;
+        }
+
+        .video-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .job-status {
+            background: #0f3460;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+
+        .job-status h2 {
+            font-size: 16px;
+            margin-bottom: 15px;
+        }
+
+        .job-list {
+            display: grid;
+            gap: 10px;
+        }
+
+        .job-item {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            padding: 12px;
+            background: #16213e;
+            border-radius: 8px;
+        }
+
+        .job-status-badge {
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-pending { background: #ffd70033; color: #ffd700; }
+        .status-processing { background: #4a9eff33; color: #4a9eff; }
+        .status-completed { background: #4ade8033; color: #4ade80; }
+        .status-failed { background: #ef444433; color: #ef4444; }
+
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #4a9eff;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #888;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            background: #16213e;
+            border: none;
+            border-radius: 8px;
+            color: #888;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .tab.active {
+            background: #4a9eff;
+            color: white;
+        }
+
+        /* Lightbox styles */
+        .lightbox {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+            cursor: zoom-out;
+        }
+
+        .lightbox.active {
+            display: flex;
+        }
+
+        .lightbox img {
+            max-width: 90%;
+            max-height: 90%;
+            border-radius: 8px;
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.5);
+        }
+
+        .lightbox-close {
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            color: #fff;
+            font-size: 40px;
+            cursor: pointer;
+            z-index: 1001;
+        }
+
+        .lightbox-nav {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 20px;
+            z-index: 1001;
+        }
+
+        .lightbox-nav button {
+            background: rgba(255, 255, 255, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: #fff;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+
+        .lightbox-nav button:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .lightbox-info {
+            position: absolute;
+            top: 20px;
+            left: 30px;
+            color: #fff;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Lightbox -->
+    <div class="lightbox" id="lightbox" onclick="closeLightbox()">
+        <span class="lightbox-close">&times;</span>
+        <div class="lightbox-info" id="lightbox-info"></div>
+        <img id="lightbox-img" src="" alt="Full size preview">
+        <div class="lightbox-nav" onclick="event.stopPropagation()">
+            <button onclick="prevImage(event)">← Previous</button>
+            <button onclick="nextImage(event)">Next →</button>
+        </div>
+    </div>
+
+    <div class="container">
+        <h1>Video Processing Pipeline</h1>
+        <p class="subtitle">Process conference recordings by extracting and composing camera quadrants</p>
+
+        <div class="tabs">
+            <button class="tab active" data-tab="videos">Videos</button>
+            <button class="tab" data-tab="jobs">Jobs</button>
+        </div>
+
+        <div id="videos-tab">
+            <div class="config-panel">
+                <h2>WebDAV Configuration</h2>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>WebDAV URL</label>
+                        <input type="text" id="webdav-url" placeholder="https://nextcloud.example.com/remote.php/webdav/" value="">
+                    </div>
+                    <div class="form-group">
+                        <label>Username</label>
+                        <input type="text" id="webdav-username" placeholder="username">
+                    </div>
+                    <div class="form-group">
+                        <label>Password</label>
+                        <input type="password" id="webdav-password" placeholder="password">
+                    </div>
+                    <div class="form-group" style="display:flex; align-items:flex-end;">
+                        <button class="btn btn-primary" onclick="loadVideos()">Load Videos</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="video-list" class="video-list">
+                <div class="empty-state">
+                    <p>Configure WebDAV and click "Load Videos" to get started</p>
+                </div>
+            </div>
+        </div>
+
+        <div id="jobs-tab" class="hidden">
+            <div class="job-status">
+                <h2>Processing Jobs</h2>
+                <div id="job-list" class="job-list">
+                    <div class="empty-state">
+                        <p>No jobs yet. Tag some videos and create processing jobs.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let videos = [];
+        let jobs = [];
+
+        // Tab switching
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                const tabName = tab.dataset.tab;
+                document.getElementById('videos-tab').classList.toggle('hidden', tabName !== 'videos');
+                document.getElementById('jobs-tab').classList.toggle('hidden', tabName !== 'jobs');
+                if (tabName === 'jobs') loadJobs();
+            });
+        });
+
+        async function loadVideos() {
+            const url = document.getElementById('webdav-url').value;
+            const username = document.getElementById('webdav-username').value;
+            const password = document.getElementById('webdav-password').value;
+
+            if (!url || !username || !password) {
+                alert('Please fill in all WebDAV fields');
+                return;
+            }
+
+            const listEl = document.getElementById('video-list');
+            listEl.innerHTML = '<div class="empty-state"><p><span class="loading"></span> Loading videos...</p></div>';
+
+            try {
+                const response = await fetch(`/api/videos?url=${encodeURIComponent(url)}&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`);
+                if (!response.ok) throw new Error('Failed to load videos');
+                videos = await response.json();
+                renderVideos();
+            } catch (error) {
+                listEl.innerHTML = `<div class="empty-state"><p>Error: ${error.message}</p></div>`;
+            }
+        }
+
+        async function renderVideos() {
+            const listEl = document.getElementById('video-list');
+            if (videos.length === 0) {
+                listEl.innerHTML = '<div class="empty-state"><p>No videos found in the specified path</p></div>';
+                return;
+            }
+
+            listEl.innerHTML = videos.map(video => `
+                <div class="video-item" data-path="${video.path}">
+                    <div class="video-info">
+                        <h3>${video.name}</h3>
+                        <p>${formatBytes(video.size)}</p>
+                    </div>
+                    <div class="preview-grid" id="previews-${escapeAttr(video.path)}">
+                        <div class="preview-frame"><span class="loading"></span></div>
+                        <div class="preview-frame"><span class="loading"></span></div>
+                        <div class="preview-frame"><span class="loading"></span></div>
+                    </div>
+                    <div class="quadrant-selector">
+                        <div class="quadrant-select">
+                            <label>Presentation Camera</label>
+                            <div class="quadrant-grid">
+                                <div class="quadrant-option" data-quadrant="top-left" data-type="presentation" data-video="${escapeAttr(video.path)}">Top Left</div>
+                                <div class="quadrant-option" data-quadrant="top-right" data-type="presentation" data-video="${escapeAttr(video.path)}">Top Right</div>
+                                <div class="quadrant-option" data-quadrant="bottom-left" data-type="presentation" data-video="${escapeAttr(video.path)}">Bottom Left</div>
+                                <div class="quadrant-option" data-quadrant="bottom-right" data-type="presentation" data-video="${escapeAttr(video.path)}">Bottom Right</div>
+                            </div>
+                        </div>
+                        <div class="quadrant-select">
+                            <label>Slides Camera</label>
+                            <div class="quadrant-grid">
+                                <div class="quadrant-option" data-quadrant="top-left" data-type="slides" data-video="${escapeAttr(video.path)}">Top Left</div>
+                                <div class="quadrant-option" data-quadrant="top-right" data-type="slides" data-video="${escapeAttr(video.path)}">Top Right</div>
+                                <div class="quadrant-option" data-quadrant="bottom-left" data-type="slides" data-video="${escapeAttr(video.path)}">Bottom Left</div>
+                                <div class="quadrant-option" data-quadrant="bottom-right" data-type="slides" data-video="${escapeAttr(video.path)}">Bottom Right</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="video-actions">
+                        <button class="btn btn-secondary" onclick="loadPreviews('${escapeAttr(video.path)}')">Load Previews</button>
+                        <button class="btn btn-primary" onclick="createJob('${escapeAttr(video.path)}')">Process Video</button>
+                    </div>
+                </div>
+            `).join('');
+
+            // Add quadrant selection handlers
+            document.querySelectorAll('.quadrant-option').forEach(opt => {
+                opt.addEventListener('click', () => {
+                    const video = opt.dataset.video;
+                    const type = opt.dataset.type;
+                    document.querySelectorAll(`.quadrant-option[data-video="${escapeAttr(video)}"][data-type="${type}"]`)
+                        .forEach(o => o.classList.remove('selected'));
+                    opt.classList.add('selected');
+                });
+            });
+        }
+
+        async function loadPreviews(videoPath) {
+            const url = document.getElementById('webdav-url').value;
+            const username = document.getElementById('webdav-username').value;
+            const password = document.getElementById('webdav-password').value;
+
+            const container = document.getElementById(`previews-${escapeAttr(videoPath)}`);
+            container.innerHTML = `
+                <div class="preview-frame"><span class="loading"></span></div>
+                <div class="preview-frame"><span class="loading"></span></div>
+                <div class="preview-frame"><span class="loading"></span></div>
+            `;
+
+            try {
+                const response = await fetch(`/api/videos/preview?url=${encodeURIComponent(url)}&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}&path=${encodeURIComponent(videoPath)}`);
+                if (!response.ok) throw new Error('Failed to load previews');
+                const previews = await response.json();
+
+                const previewImages = [previews.first, previews.middle, previews.last].filter(p => p);
+                const labels = ['Start', 'Middle', 'End'];
+
+                container.innerHTML = previewImages.map((src, i) => `
+                    <div class="preview-frame" onclick="openLightbox('${escapeAttr(src)}', ${i}, '${escapeAttr(JSON.stringify(previewImages))}', '${escapeAttr(JSON.stringify(labels))}')">
+                        <img src="${src}" alt="${labels[i]} frame">
+                        <span class="label">${labels[i]}</span>
+                    </div>
+                `).join('');
+            } catch (error) {
+                container.innerHTML = `<div class="empty-state" style="grid-column: span 3;"><p>Error: ${error.message}</p></div>`;
+            }
+        }
+
+        async function createJob(videoPath) {
+            const presentation = document.querySelector(`.quadrant-option[data-video="${escapeAttr(videoPath)}"][data-type="presentation"].selected`);
+            const slides = document.querySelector(`.quadrant-option[data-video="${escapeAttr(videoPath)}"][data-type="slides"].selected`);
+
+            if (!presentation || !slides) {
+                alert('Please select both presentation and slides quadrants');
+                return;
+            }
+
+            const url = document.getElementById('webdav-url').value;
+            const username = document.getElementById('webdav-username').value;
+            const password = document.getElementById('webdav-password').value;
+
+            const output_path = videoPath.replace(/\.(mp4|mkv|mov|avi|webm)$/, '_processed.mp4');
+
+            try {
+                const response = await fetch('/api/jobs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        video_path: videoPath,
+                        output_path: output_path,
+                        presentation_quadrant: presentation.dataset.quadrant,
+                        slides_quadrant: slides.dataset.quadrant,
+                        webdav_url: url,
+                        webdav_username: username,
+                        webdav_password: password,
+                    })
+                });
+
+                if (!response.ok) throw new Error('Failed to create job');
+                const job = await response.json();
+                alert(`Job created: ${job.id}`);
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        async function loadJobs() {
+            const listEl = document.getElementById('job-list');
+            try {
+                const response = await fetch('/api/jobs');
+                jobs = await response.json();
+                renderJobs();
+            } catch (error) {
+                listEl.innerHTML = `<div class="empty-state"><p>Error: ${error.message}</p></div>`;
+            }
+        }
+
+        function renderJobs() {
+            const listEl = document.getElementById('job-list');
+            if (jobs.length === 0) {
+                listEl.innerHTML = '<div class="empty-state"><p>No jobs yet. Tag some videos and create processing jobs.</p></div>';
+                return;
+            }
+
+            listEl.innerHTML = jobs.map(job => `
+                <div class="job-item">
+                    <span class="job-status-badge status-${job.status}">${job.status}</span>
+                    <div style="flex:1;">
+                        <div style="font-size:13px; font-weight:500;">${job.video_path.split('/').pop()}</div>
+                        <div style="font-size:11px; color:#888;">${new Date(job.created_at).toLocaleString()}</div>
+                    </div>
+                    <div style="font-size:11px; color:#888;">
+                        ${job.selection.presentation}/${job.selection.slides}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        function escapeAttr(str) {
+            return str.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        }
+
+        // Lightbox functionality
+        let currentLightboxImages = [];
+        let currentLightboxLabels = [];
+        let currentLightboxIndex = 0;
+
+        function openLightbox(src, index, imagesJson, labelsJson) {
+            currentLightboxImages = JSON.parse(imagesJson);
+            currentLightboxLabels = JSON.parse(labelsJson);
+            currentLightboxIndex = index;
+
+            const img = document.getElementById('lightbox-img');
+            const info = document.getElementById('lightbox-info');
+
+            img.src = src;
+            info.textContent = `${currentLightboxLabels[index]} (${index + 1} / ${currentLightboxImages.length})`;
+            document.getElementById('lightbox').classList.add('active');
+        }
+
+        function closeLightbox() {
+            document.getElementById('lightbox').classList.remove('active');
+        }
+
+        function nextImage(event) {
+            event.stopPropagation();
+            currentLightboxIndex = (currentLightboxIndex + 1) % currentLightboxImages.length;
+            updateLightboxImage();
+        }
+
+        function prevImage(event) {
+            event.stopPropagation();
+            currentLightboxIndex = (currentLightboxIndex - 1 + currentLightboxImages.length) % currentLightboxImages.length;
+            updateLightboxImage();
+        }
+
+        function updateLightboxImage() {
+            const img = document.getElementById('lightbox-img');
+            const info = document.getElementById('lightbox-info');
+            img.src = currentLightboxImages[currentLightboxIndex];
+            info.textContent = `${currentLightboxLabels[currentLightboxIndex]} (${currentLightboxIndex + 1} / ${currentLightboxImages.length})`;
+        }
+
+        // Close lightbox on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeLightbox();
+            if (e.key === 'ArrowRight') nextImage({ stopPropagation: () => {} });
+            if (e.key === 'ArrowLeft') prevImage({ stopPropagation: () => {} });
+        });
+
+        // Auto-refresh jobs every 10 seconds
+        setInterval(() => {
+            if (!document.getElementById('jobs-tab').classList.contains('hidden')) {
+                loadJobs();
+            }
+        }, 10000);
+    </script>
+</body>
+</html>

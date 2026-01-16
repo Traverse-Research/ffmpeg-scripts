@@ -1,1 +1,7 @@
 /target
+/tmpclaude-*-cwd
+/data/
+/assets/
+*.mp4
+nul
+gpc-bg.png

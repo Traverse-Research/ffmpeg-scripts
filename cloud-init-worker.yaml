@@ -1,0 +1,50 @@
+#cloud-config
+# FFmpeg Worker Cloud-Init Configuration for Hetzner
+#
+# Usage:
+# 1. Set HETZNER_TOKEN environment variable with your API token
+# 2. Upload the worker binary to a publicly accessible URL
+# 3. Upload the background image (gpc-bg.png) to a publicly accessible URL
+# 4. Generate cloud-init config:
+#    cargo run -- hetzner cloud-init \
+#      --queue-url http://your-server:3000 \
+#      --binary-url https://your-server/ffmpeg-gpc-linux \
+#      --bg-image-url https://your-server/gpc-bg.png
+#
+# Or create server directly:
+#    cargo run -- hetzner provision-worker \
+#      --queue-url http://your-server:3000 \
+#      --binary-url https://your-server/ffmpeg-gpc-linux \
+#      --bg-image-url https://your-server/gpc-bg.png
+
+package_update: true
+package_upgrade: true
+
+# Install required packages
+packages:
+  - ffmpeg
+  - wget
+  - curl
+
+# Optional: Add your SSH public key here for manual access
+# ssh_authorized_keys:
+#   - ssh-rsa AAAAB3NzaC1yc2EAAA... your-key-comment
+
+# Commands to run on first boot
+runcmd:
+  # Download background image
+  - wget -O /root/gpc-bg.png ${BG_IMAGE_URL}
+
+  # Download and setup worker binary
+  - wget -O /tmp/worker ${BINARY_URL}
+  - chmod +x /tmp/worker
+
+  # Start the worker
+  - /tmp/worker worker --queue-url ${QUEUE_URL}
+
+# Final message to confirm setup completion
+final_message: "FFmpeg worker is ready and processing jobs!"
+
+# Output to console for debugging
+output:
+  all: "| tee -a /var/log/cloud-init-output.log"
