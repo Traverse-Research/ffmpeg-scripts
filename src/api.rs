@@ -88,6 +88,7 @@ pub async fn run_server(port: u16, data_dir: &str) -> Result<()> {
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/jobs/{id}", patch(update_job))
         .route("/api/jobs/pending", get(get_pending_job))
+        .route("/api/jobs/claim", post(claim_job))
         .route("/health", get(health_check))
         // Static files for worker provisioning
         .route("/assets/worker", get(serve_worker_binary))
@@ -371,6 +372,37 @@ async fn get_pending_job(State(state): State<AppState>) -> Response {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: format!("Failed to get pending jobs: {}", e),
         }.into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimJobRequest {
+    worker_id: String,
+}
+
+/// Atomically claim a pending job for a worker.
+/// This prevents multiple workers from claiming the same job.
+async fn claim_job(
+    State(state): State<AppState>,
+    Json(req): Json<ClaimJobRequest>,
+) -> Response {
+    let queue = state.queue.lock().unwrap();
+    match queue.claim_job(&req.worker_id) {
+        Ok(Some(job)) => {
+            info!("Worker {} claimed job {}", req.worker_id, job.id);
+            Json(job).into_response()
+        }
+        Ok(None) => {
+            // No pending jobs available
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => {
+            error!("Failed to claim job: {}", e);
+            AppError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: format!("Failed to claim job: {}", e),
+            }.into_response()
+        }
     }
 }
 

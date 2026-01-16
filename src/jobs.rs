@@ -178,20 +178,48 @@ impl JobQueue {
     pub fn list_jobs(&self) -> Result<Vec<Job>> {
         self.load_jobs()
     }
+
+    /// Atomically claim a pending job for a worker.
+    /// Returns the job if one was claimed, None if no pending jobs exist.
+    pub fn claim_job(&self, worker_id: &str) -> Result<Option<Job>> {
+        let mut jobs = self.load_jobs()?;
+
+        // Find first pending job
+        let job = jobs
+            .iter_mut()
+            .find(|j| matches!(j.status, JobStatus::Pending));
+
+        match job {
+            Some(job) => {
+                // Atomically mark as processing and assign worker
+                job.status = JobStatus::Processing;
+                job.started_at = Some(Utc::now());
+                job.worker_id = Some(worker_id.to_string());
+
+                let claimed_job = job.clone();
+                self.save_jobs(&jobs)?;
+
+                Ok(Some(claimed_job))
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 pub async fn run_worker(queue_url: String) -> Result<()> {
-    info!("Starting worker, polling queue at: {}", queue_url);
+    // Generate a unique worker ID for this instance
+    let worker_id = format!("worker-{}", uuid::Uuid::new_v4().simple());
+    info!("Starting worker {} polling queue at: {}", worker_id, queue_url);
 
     let mut tick = interval(Duration::from_secs(10));
 
     loop {
         tick.tick().await;
 
-        // Poll for jobs
-        match poll_queue(&queue_url).await {
+        // Try to claim a job atomically
+        match claim_job(&queue_url, &worker_id).await {
             Ok(Some(job)) => {
-                info!("Received job: {}", job.id);
+                info!("Worker {} claimed job: {}", worker_id, job.id);
                 if let Err(e) = process_job(job).await {
                     error!("Job processing failed: {}", e);
                 }
@@ -200,36 +228,42 @@ pub async fn run_worker(queue_url: String) -> Result<()> {
                 info!("No jobs available");
             }
             Err(e) => {
-                warn!("Failed to poll queue: {}", e);
+                warn!("Failed to claim job: {}", e);
             }
         }
     }
 }
 
-async fn poll_queue(queue_url: &str) -> Result<Option<Job>> {
-    let url = format!("{}/jobs/pending", queue_url);
-    info!("Polling: {}", url);
+async fn claim_job(queue_url: &str, worker_id: &str) -> Result<Option<Job>> {
+    let url = format!("{}/api/jobs/claim", queue_url);
+    info!("Claiming job at: {}", url);
 
     let client = reqwest::Client::new();
     let response = client
-        .get(&url)
+        .post(&url)
+        .json(&serde_json::json!({ "worker_id": worker_id }))
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to poll queue: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to claim job: {}", e))?;
 
     let status = response.status();
-    info!("Poll response status: {}", status);
+    info!("Claim response status: {}", status);
 
     if status.as_u16() == 204 {
         return Ok(None);
     }
 
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("Claim failed with status {}: {}", status, body));
+    }
+
     let body = response.text().await.map_err(|e| anyhow::anyhow!("Failed to read response: {}", e))?;
-    info!("Poll response body: {}", body);
+    info!("Claim response body: {}", body);
 
     let job: Job = serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("Failed to parse job: {} - body was: {}", e, body))?;
-    info!("Parsed job: {} with status {:?}", job.id, job.status);
+    info!("Claimed job: {} with status {:?}", job.id, job.status);
     Ok(Some(job))
 }
 
@@ -275,38 +309,16 @@ async fn process_job(job: Job) -> Result<()> {
     let filter_complex = build_filter_complex(&job.selection)?;
     info!("FFmpeg filter: {}", filter_complex);
 
-    // Create the output folder on WebDAV if needed (before FFmpeg runs)
-    // job.output_path is like "processed/filename.mp4"
-    if let Some(folder_end) = job.output_path.rfind('/') {
-        let folder = &job.output_path[..folder_end];
-        if !folder.is_empty() {
-            info!("Creating WebDAV client to ensure folder exists...");
-            let dav_client = WebDavClient::new(&job.webdav_config)?;
-            info!("Ensuring folder exists: {}", folder);
-            if let Err(e) = dav_client.ensure_folder_exists(folder).await {
-                warn!("Could not create folder {}: {} (may already exist)", folder, e);
-            }
-        }
-    }
+    // Local output path for FFmpeg
+    let local_output_path = format!("{}/output.mp4", temp_dir);
+    info!("Local output path: {}", local_output_path);
 
-    // Build WebDAV URL for direct output from FFmpeg
-    let output_url = build_webdav_upload_url(&job.webdav_config, &job.output_path);
-    info!("FFmpeg will output directly to WebDAV: {}", job.output_path);
-    // Log URL without credentials for debugging
-    let output_url_safe = output_url.replacen(
-        &format!("://{}:{}@", encode(&job.webdav_config.username), encode(&job.webdav_config.password)),
-        "://[credentials]@",
-        1
-    );
-    info!("Output URL (redacted): {}", output_url_safe);
+    info!("Starting FFmpeg (output to local file)...");
 
-    info!("Starting FFmpeg with direct WebDAV output...");
-
-    // Run FFmpeg command - output directly to WebDAV
-    // Use fragmented MP4 with empty_moov so we can stream without seeking
+    // Run FFmpeg command - output to local file first
     let ffmpeg_result = tokio::process::Command::new("ffmpeg")
         .arg("-y")  // Overwrite output
-        .arg("-i").arg(&video_url)  // Input video
+        .arg("-i").arg(&video_url)  // Input video (streaming from WebDAV)
         .arg("-i").arg(bg_image_path)  // Background image
         .arg("-filter_complex").arg(&filter_complex)
         .arg("-map").arg("[outv]")
@@ -315,10 +327,8 @@ async fn process_job(job: Job) -> Result<()> {
         .arg("-crf").arg("18")
         .arg("-preset").arg("veryfast")
         .arg("-threads").arg("0")
-        .arg("-c:a").arg("aac")  // Re-encode audio for fragmented mp4 compatibility
-        .arg("-movflags").arg("frag_keyframe+empty_moov")  // Fragmented MP4 for streaming
-        .arg("-method").arg("PUT")  // Use HTTP PUT for WebDAV
-        .arg(&output_url)
+        .arg("-c:a").arg("copy")
+        .arg(&local_output_path)
         .output()
         .await;
 
@@ -335,20 +345,57 @@ async fn process_job(job: Job) -> Result<()> {
             }
 
             if output.status.success() {
-                info!("FFmpeg processing and direct WebDAV upload successful!");
-                info!("Job {} completed successfully", job.id);
+                info!("FFmpeg processing successful!");
 
-                // Update job to completed via queue URL
-                if let Some(queue_url) = &job.webdav_config.queue_url {
-                    info!("Updating job status to completed at: {}", queue_url);
-                    match update_job_status_remote(queue_url, &job.id, JobStatus::Completed, None).await {
-                        Ok(_) => info!("Status update successful"),
-                        Err(e) => error!("Status update failed: {}", e),
+                // Check output file size
+                match fs::metadata(&local_output_path) {
+                    Ok(meta) => info!("Output file size: {} bytes", meta.len()),
+                    Err(e) => error!("Failed to stat output file: {}", e),
+                }
+
+                // Now upload to WebDAV
+                info!("Reading output file for upload...");
+                let output_data = fs::read(&local_output_path)?;
+                info!("Read {} bytes, uploading to WebDAV...", output_data.len());
+
+                let dav_client = WebDavClient::new(&job.webdav_config)?;
+
+                // Create the output folder on WebDAV if needed
+                // job.output_path is like "processed/filename.mp4"
+                if let Some(folder_end) = job.output_path.rfind('/') {
+                    let folder = &job.output_path[..folder_end];
+                    if !folder.is_empty() {
+                        info!("Ensuring folder exists: {}", folder);
+                        if let Err(e) = dav_client.ensure_folder_exists(folder).await {
+                            warn!("Could not create folder {}: {} (may already exist)", folder, e);
+                        }
+                    }
+                }
+
+                info!("Uploading to: {}", job.output_path);
+                match dav_client.upload_file(&job.output_path, output_data).await {
+                    Ok(_) => {
+                        info!("Upload successful!");
+                        info!("Job {} completed successfully", job.id);
+
+                        // Update job to completed via queue URL
+                        if let Some(queue_url) = &job.webdav_config.queue_url {
+                            info!("Updating job status to completed at: {}", queue_url);
+                            match update_job_status_remote(queue_url, &job.id, JobStatus::Completed, None).await {
+                                Ok(_) => info!("Status update successful"),
+                                Err(e) => error!("Status update failed: {}", e),
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Upload FAILED: {}", e);
+                        if let Some(queue_url) = &job.webdav_config.queue_url {
+                            let _ = update_job_status_remote(queue_url, &job.id, JobStatus::Failed, None).await;
+                        }
                     }
                 }
             } else {
                 error!("FFmpeg FAILED with exit code: {}", output.status);
-                error!("Direct WebDAV output failed - check FFmpeg stderr above for details");
 
                 if let Some(queue_url) = &job.webdav_config.queue_url {
                     let _ = update_job_status_remote(queue_url, &job.id, JobStatus::Failed, None).await;
@@ -423,19 +470,6 @@ fn build_webdav_download_url(config: &WebDavConfig, path: &str) -> String {
     )
     .replacen("://", &format!("://{}:{}@", encode(&config.username), encode(&config.password)), 1)
 }
-
-fn build_webdav_upload_url(config: &WebDavConfig, output_path: &str) -> String {
-    // Build full WebDAV URL for uploading
-    // config.url is like: https://cloud.example.com/remote.php/dav/files/user/VideoTest
-    // output_path is like: processed/filename.mp4
-    // Result: https://user:pass@cloud.example.com/remote.php/dav/files/user/VideoTest/processed/filename.mp4
-
-    let base_url = config.url.trim_end_matches('/');
-    let full_url = format!("{}/{}", base_url, output_path);
-
-    full_url.replacen("://", &format!("://{}:{}@", encode(&config.username), encode(&config.password)), 1)
-}
-
 async fn update_job_status_remote(
     queue_url: &str,
     job_id: &str,
