@@ -237,8 +237,8 @@ async fn process_job(job: Job) -> Result<()> {
     let video_url = build_webdav_download_url(&job.webdav_config, &job.video_path);
     let _input_path = format!("{}/input.mp4", temp_dir);
 
-    // Background image path
-    let bg_image_path = "./gpc-bg.png";
+    // Background image path (downloaded by cloud-init to /root)
+    let bg_image_path = "/root/gpc-bg.png";
 
     let output_path = format!("{}/output.mp4", temp_dir);
 

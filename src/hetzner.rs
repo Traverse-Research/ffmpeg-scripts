@@ -20,9 +20,9 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             name: "ffmpeg-worker".to_string(),
-            server_type: "cpx21".to_string(), // 4 CPU, 8 GB RAM
+            server_type: "cpx11".to_string(), // 4 CPU, 8 GB RAM
             image: "ubuntu-24.04".to_string(),
-            location: "fsn1".to_string(), // Falkenstein
+            location: "nbg1".to_string(), // Falkenstein
             ssh_keys: vec![],
             user_data: String::new(),
             labels: vec![("worker".to_string(), "ffmpeg-gpc".to_string())],
@@ -53,30 +53,39 @@ pub struct Ipv4 {
     pub ip: String,
 }
 
+#[derive(Debug)]
+pub struct ServerType {
+    pub name: String,
+    pub cores: u32,
+    pub memory: u32,
+    pub disk: u32,
+    pub locations: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct Datacenter {
+    pub name: String,
+    pub location: String,
+    pub server_types: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct CreateServerRequest {
     name: String,
     server_type: String,
     image: String,
-    location: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ssh_keys: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     user_data: Option<String>,
-    labels: Option<Vec<Label>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Label {
-    key: String,
-    value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    labels: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CreateServerResponse {
-    server: ServerData,
-}
-
-#[derive(Debug, Deserialize)]
-struct ServerData {
     server: Server,
 }
 
@@ -109,16 +118,7 @@ impl HetznerClient {
         let labels = if config.labels.is_empty() {
             None
         } else {
-            Some(
-                config
-                    .labels
-                    .iter()
-                    .map(|(k, v)| Label {
-                        key: k.clone(),
-                        value: v.clone(),
-                    })
-                    .collect(),
-            )
+            Some(config.labels.iter().cloned().collect())
         };
 
         let ssh_keys = if config.ssh_keys.is_empty() {
@@ -133,17 +133,24 @@ impl HetznerClient {
             Some(config.user_data.clone())
         };
 
+        let location = if config.location.is_empty() {
+            None
+        } else {
+            Some(config.location.clone())
+        };
+
         let payload = CreateServerRequest {
             name: config.name.clone(),
             server_type: config.server_type.clone(),
             image: config.image.clone(),
-            location: config.location.clone(),
+            location,
             ssh_keys,
             user_data,
             labels,
         };
 
-        debug!("Creating server: {}", config.name);
+        debug!("Creating server: {} with type: {}, location: {:?}", config.name, config.server_type, &payload.location);
+        debug!("Request payload: {:?}", serde_json::to_string(&payload));
 
         let response = self
             .client
@@ -173,10 +180,10 @@ impl HetznerClient {
 
         info!(
             "Server created: {} (ID: {}, IP: {})",
-            result.server.server.name, result.server.server.id, result.server.server.public_net.ipv4.ip
+            result.server.name, result.server.id, result.server.public_net.ipv4.ip
         );
 
-        Ok(result.server.server)
+        Ok(result.server)
     }
 
     pub async fn delete_server(&self, id: u64) -> Result<()> {
@@ -231,7 +238,7 @@ impl HetznerClient {
 
         #[derive(Debug, Deserialize)]
         struct ListServersResponse {
-            servers: Vec<ServerData>,
+            servers: Vec<Server>,
         }
 
         let result: ListServersResponse = response
@@ -239,7 +246,128 @@ impl HetznerClient {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
 
-        Ok(result.servers.into_iter().map(|s| s.server).collect())
+        Ok(result.servers)
+    }
+
+    pub async fn list_server_types(&self) -> Result<Vec<ServerType>> {
+        let url = format!("{}/server_types", HETZNER_API_BASE);
+
+        let response = self
+            .client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.api_token))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+
+        let status = response.status();
+
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Failed to list server types: {} - {}",
+                status,
+                error_text
+            ));
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct ServerTypeResponse {
+            name: String,
+            cores: u32,
+            memory: f64,
+            disk: u32,
+            prices: Vec<PriceInfo>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct PriceInfo {
+            location: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct ListServerTypesResponse {
+            server_types: Vec<ServerTypeResponse>,
+        }
+
+        let result: ListServerTypesResponse = response
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+
+        Ok(result
+            .server_types
+            .into_iter()
+            .map(|st| ServerType {
+                name: st.name,
+                cores: st.cores,
+                memory: st.memory as u32,
+                disk: st.disk,
+                locations: st.prices.into_iter().map(|p| p.location).collect(),
+            })
+            .collect())
+    }
+
+    pub async fn list_datacenters(&self) -> Result<Vec<Datacenter>> {
+        let url = format!("{}/datacenters", HETZNER_API_BASE);
+
+        let response = self
+            .client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.api_token))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+
+        let status = response.status();
+
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Failed to list datacenters: {} - {}",
+                status,
+                error_text
+            ));
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct Location {
+            name: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct ServerTypesAvailable {
+            available: Vec<u64>,
+            available_for_migration: Vec<u64>,
+            supported: Vec<u64>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct DatacenterResponse {
+            name: String,
+            location: Location,
+            server_types: ServerTypesAvailable,
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct ListDatacentersResponse {
+            datacenters: Vec<DatacenterResponse>,
+        }
+
+        let result: ListDatacentersResponse = response
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+
+        Ok(result
+            .datacenters
+            .into_iter()
+            .map(|dc| Datacenter {
+                name: dc.name,
+                location: dc.location.name,
+                server_types: dc.server_types.available.iter().map(|id| id.to_string()).collect(),
+            })
+            .collect())
     }
 
     pub async fn get_server(&self, id: u64) -> Result<Server> {
@@ -264,7 +392,12 @@ impl HetznerClient {
             ));
         }
 
-        let result: ServerData = response
+        #[derive(Debug, Deserialize)]
+        struct GetServerResponse {
+            server: Server,
+        }
+
+        let result: GetServerResponse = response
             .json()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
@@ -340,9 +473,9 @@ pub async fn provision_worker(
 
     let config = ServerConfig {
         name,
-        server_type: "cpx21".to_string(),
+        server_type: "ccx23".to_string(), // 4 dedicated vCPUs, 16GB RAM
         image: "ubuntu-24.04".to_string(),
-        location: "fsn1".to_string(),
+        location: "nbg1".to_string(), // Nuremberg, Germany
         user_data,
         ..Default::default()
     };

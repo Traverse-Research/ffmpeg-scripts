@@ -36,3 +36,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # HTTP client for Hetzner API
 base64 = "0.22"
+
+[[bin]]
+name = "ffmpeg-gpc"
+path = "src/main.rs"
+
+[[bin]]
+name = "hetzner-cli"
+path = "src/hetzner_cli.rs"

@@ -1,5 +1,4 @@
 mod api;
-mod hetzner;
 mod jobs;
 mod processing;
 mod webdav;
@@ -48,56 +47,6 @@ enum Commands {
         username: String,
         password: String,
         path: String,
-    },
-    /// Hetzner cloud operations
-    Hetzner {
-        #[command(subcommand)]
-        hetzner_command: HetznerCommands,
-    },
-}
-
-#[derive(Subcommand)]
-enum HetznerCommands {
-    /// Provision a new worker VM on Hetzner
-    ProvisionWorker {
-        /// Hetzner API token (or set HETZNER_TOKEN env var)
-        #[arg(short, long, env = "HETZNER_TOKEN")]
-        token: String,
-        /// Server URL (serves queue API, worker binary, and background image)
-        #[arg(long)]
-        server_url: String,
-        /// Server name (optional, auto-generated if not provided)
-        #[arg(long)]
-        name: Option<String>,
-    },
-    /// List all Hetzner servers
-    ListServers {
-        /// Hetzner API token (or set HETZNER_TOKEN env var)
-        #[arg(short, long, env = "HETZNER_TOKEN")]
-        token: String,
-    },
-    /// Delete a Hetzner server
-    DeleteServer {
-        /// Hetzner API token (or set HETZNER_TOKEN env var)
-        #[arg(short, long, env = "HETZNER_TOKEN")]
-        token: String,
-        /// Server ID to delete
-        id: u64,
-    },
-    /// Generate cloud-init config for manual use
-    CloudInit {
-        /// Queue URL for the worker to poll
-        #[arg(long)]
-        queue_url: String,
-        /// URL to download the worker binary from
-        #[arg(long)]
-        binary_url: String,
-        /// URL to download the background image from
-        #[arg(long)]
-        bg_image_url: String,
-        /// Optional SSH public key to add
-        #[arg(long)]
-        ssh_key: Option<String>,
     },
 }
 
@@ -148,66 +97,6 @@ async fn main() -> Result<()> {
         } => {
             webdav::list_videos(&webdav_url, &username, &password, &path).await?;
         }
-        Commands::Hetzner { hetzner_command } => match hetzner_command {
-            HetznerCommands::ProvisionWorker {
-                token,
-                server_url,
-                name,
-            } => {
-                let base = server_url.trim_end_matches('/');
-                let queue_url = format!("{}/api", base);
-                let binary_url = format!("{}/assets/worker", base);
-                let bg_image_url = format!("{}/assets/gpc-bg.png", base);
-
-                let ip = hetzner::provision_worker(
-                    &token,
-                    &queue_url,
-                    &binary_url,
-                    &bg_image_url,
-                    name,
-                )
-                .await?;
-                println!("Worker provisioned at IP: {}", ip);
-            }
-            HetznerCommands::ListServers { token } => {
-                let client = hetzner::HetznerClient::new(token);
-                let servers = client.list_servers().await?;
-                println!("Found {} servers:", servers.len());
-                for server in servers {
-                    println!(
-                        "  {} ({}): {} - {}",
-                        server.id, server.name, server.status, server.public_net.ipv4.ip
-                    );
-                }
-            }
-            HetznerCommands::DeleteServer { token, id } => {
-                let client = hetzner::HetznerClient::new(token);
-                client.delete_server(id).await?;
-                println!("Server {} deleted", id);
-            }
-            HetznerCommands::CloudInit {
-                queue_url,
-                binary_url,
-                bg_image_url,
-                ssh_key,
-            } => {
-                let cloud_init = if let Some(key) = ssh_key {
-                    hetzner::worker_cloud_init_with_ssh(
-                        &queue_url,
-                        &binary_url,
-                        &bg_image_url,
-                        &key,
-                    )
-                } else {
-                    hetzner::HetznerClient::worker_cloud_init(
-                        &queue_url,
-                        &binary_url,
-                        &bg_image_url,
-                    )
-                };
-                println!("{}", cloud_init);
-            }
-        },
     }
 
     Ok(())
