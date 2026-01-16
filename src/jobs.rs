@@ -326,8 +326,16 @@ async fn process_job(job: Job) -> Result<()> {
                 info!("Creating WebDAV client...");
                 let dav_client = WebDavClient::new(&job.webdav_config)?;
 
-                info!("Uploading processed video to: {}", job.output_path);
-                match dav_client.upload_file(&job.output_path, output_data).await {
+                // Extract just the filename from the full path for upload
+                // output_path is like /remote.php/dav/files/jasper/VideoTest/test-2s_processed.mp4
+                // We need just the filename: test-2s_processed.mp4
+                let upload_filename = job.output_path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&job.output_path);
+
+                info!("Uploading processed video as: {} (from path: {})", upload_filename, job.output_path);
+                match dav_client.upload_file(upload_filename, output_data).await {
                     Ok(_) => info!("Upload successful!"),
                     Err(e) => error!("Upload FAILED: {}", e),
                 }
