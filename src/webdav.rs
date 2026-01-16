@@ -114,6 +114,26 @@ impl WebDavClient {
 
         Ok(())
     }
+
+    pub async fn create_folder(&self, path: &str) -> Result<()> {
+        self.client
+            .mkcol(path)
+            .await
+            .map_err(|e| anyhow!("Failed to create folder: {:?}", e))?;
+
+        Ok(())
+    }
+
+    pub async fn ensure_folder_exists(&self, path: &str) -> Result<()> {
+        // Try to create the folder - if it already exists, mkcol will fail but that's OK
+        match self.client.mkcol(path).await {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                // Folder might already exist, which is fine
+                Ok(())
+            }
+        }
+    }
 }
 
 pub async fn list_videos(

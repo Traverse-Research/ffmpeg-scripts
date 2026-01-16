@@ -581,7 +581,9 @@
             const username = document.getElementById('webdav-username').value;
             const password = document.getElementById('webdav-password').value;
 
-            const output_path = videoPath.replace(/\.(mp4|mkv|mov|avi|webm)$/, '_processed.mp4');
+            // Put output in /processed/ subfolder with same filename but .mp4 extension
+            const filename = videoPath.split('/').pop().replace(/\.(mp4|mkv|mov|avi|webm)$/, '.mp4');
+            const output_path = 'processed/' + filename;
 
             try {
                 const response = await fetch('/api/jobs', {
