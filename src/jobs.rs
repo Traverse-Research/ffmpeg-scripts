@@ -235,7 +235,7 @@ pub async fn run_worker(queue_url: String) -> Result<()> {
 }
 
 async fn claim_job(queue_url: &str, worker_id: &str) -> Result<Option<Job>> {
-    let url = format!("{}/api/jobs/claim", queue_url);
+    let url = format!("{}/jobs/claim", queue_url);
     info!("Claiming job at: {}", url);
 
     let client = reqwest::Client::new();
