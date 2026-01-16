@@ -178,20 +178,48 @@ impl JobQueue {
     pub fn list_jobs(&self) -> Result<Vec<Job>> {
         self.load_jobs()
     }
+
+    /// Atomically claim a pending job for a worker.
+    /// Returns the job if one was claimed, None if no pending jobs exist.
+    pub fn claim_job(&self, worker_id: &str) -> Result<Option<Job>> {
+        let mut jobs = self.load_jobs()?;
+
+        // Find first pending job
+        let job = jobs
+            .iter_mut()
+            .find(|j| matches!(j.status, JobStatus::Pending));
+
+        match job {
+            Some(job) => {
+                // Atomically mark as processing and assign worker
+                job.status = JobStatus::Processing;
+                job.started_at = Some(Utc::now());
+                job.worker_id = Some(worker_id.to_string());
+
+                let claimed_job = job.clone();
+                self.save_jobs(&jobs)?;
+
+                Ok(Some(claimed_job))
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 pub async fn run_worker(queue_url: String) -> Result<()> {
-    info!("Starting worker, polling queue at: {}", queue_url);
+    // Generate a unique worker ID for this instance
+    let worker_id = format!("worker-{}", uuid::Uuid::new_v4().simple());
+    info!("Starting worker {} polling queue at: {}", worker_id, queue_url);
 
     let mut tick = interval(Duration::from_secs(10));
 
     loop {
         tick.tick().await;
 
-        // Poll for jobs
-        match poll_queue(&queue_url).await {
+        // Try to claim a job atomically
+        match claim_job(&queue_url, &worker_id).await {
             Ok(Some(job)) => {
-                info!("Received job: {}", job.id);
+                info!("Worker {} claimed job: {}", worker_id, job.id);
                 if let Err(e) = process_job(job).await {
                     error!("Job processing failed: {}", e);
                 }
@@ -200,36 +228,42 @@ pub async fn run_worker(queue_url: String) -> Result<()> {
                 info!("No jobs available");
             }
             Err(e) => {
-                warn!("Failed to poll queue: {}", e);
+                warn!("Failed to claim job: {}", e);
             }
         }
     }
 }
 
-async fn poll_queue(queue_url: &str) -> Result<Option<Job>> {
-    let url = format!("{}/jobs/pending", queue_url);
-    info!("Polling: {}", url);
+async fn claim_job(queue_url: &str, worker_id: &str) -> Result<Option<Job>> {
+    let url = format!("{}/api/jobs/claim", queue_url);
+    info!("Claiming job at: {}", url);
 
     let client = reqwest::Client::new();
     let response = client
-        .get(&url)
+        .post(&url)
+        .json(&serde_json::json!({ "worker_id": worker_id }))
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to poll queue: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to claim job: {}", e))?;
 
     let status = response.status();
-    info!("Poll response status: {}", status);
+    info!("Claim response status: {}", status);
 
     if status.as_u16() == 204 {
         return Ok(None);
     }
 
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("Claim failed with status {}: {}", status, body));
+    }
+
     let body = response.text().await.map_err(|e| anyhow::anyhow!("Failed to read response: {}", e))?;
-    info!("Poll response body: {}", body);
+    info!("Claim response body: {}", body);
 
     let job: Job = serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("Failed to parse job: {} - body was: {}", e, body))?;
-    info!("Parsed job: {} with status {:?}", job.id, job.status);
+    info!("Claimed job: {} with status {:?}", job.id, job.status);
     Ok(Some(job))
 }
 
