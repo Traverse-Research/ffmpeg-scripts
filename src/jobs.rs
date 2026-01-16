@@ -303,6 +303,7 @@ async fn process_job(job: Job) -> Result<()> {
     info!("Starting FFmpeg with direct WebDAV output...");
 
     // Run FFmpeg command - output directly to WebDAV
+    // Use fragmented MP4 with empty_moov so we can stream without seeking
     let ffmpeg_result = tokio::process::Command::new("ffmpeg")
         .arg("-y")  // Overwrite output
         .arg("-i").arg(&video_url)  // Input video
@@ -314,7 +315,8 @@ async fn process_job(job: Job) -> Result<()> {
         .arg("-crf").arg("18")
         .arg("-preset").arg("veryfast")
         .arg("-threads").arg("0")
-        .arg("-c:a").arg("copy")
+        .arg("-c:a").arg("aac")  // Re-encode audio for fragmented mp4 compatibility
+        .arg("-movflags").arg("frag_keyframe+empty_moov")  // Fragmented MP4 for streaming
         .arg("-method").arg("PUT")  // Use HTTP PUT for WebDAV
         .arg(&output_url)
         .output()
