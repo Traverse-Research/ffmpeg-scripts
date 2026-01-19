@@ -539,6 +539,7 @@ async fn process_job(job: Job) -> Result<()> {
     let stdout = child.stdout.take();
     let queue_url_clone = job.webdav_config.queue_url.clone();
     let job_id_clone = job.id.clone();
+    let rlog_clone = rlog.clone();
 
     // Spawn a task to read and parse progress
     let progress_handle = tokio::spawn(async move {
@@ -552,9 +553,13 @@ async fn process_job(job: Job) -> Result<()> {
             let mut current_speed: Option<String> = None;
             let mut total_duration: Option<String> = None;
             let mut last_report = std::time::Instant::now();
+            let mut last_log_flush = std::time::Instant::now();
             let mut progress_count = 0u32;
 
             info!("Starting to read FFmpeg progress from stdout...");
+            if let Some(ref logger) = rlog_clone {
+                logger.info("Starting to read FFmpeg progress from stdout...");
+            }
 
             while let Ok(Some(line)) = lines.next_line().await {
                 // Parse FFmpeg progress output format:
@@ -583,8 +588,12 @@ async fn process_job(job: Job) -> Result<()> {
                     // End of a progress block - report to server (throttled)
                     if last_report.elapsed() >= std::time::Duration::from_secs(2) {
                         if let Some(queue_url) = &queue_url_clone {
-                            info!("Sending progress update #{}: frame={:?}, time={:?}, speed={:?}",
+                            let msg = format!("Progress update #{}: frame={:?}, time={:?}, speed={:?}",
                                   progress_count, current_frame, current_time, current_speed);
+                            info!("{}", msg);
+                            if let Some(ref logger) = rlog_clone {
+                                logger.info(&msg);
+                            }
                             let progress = JobProgress {
                                 frame: current_frame,
                                 total_frames: None,
@@ -601,11 +610,26 @@ async fn process_job(job: Job) -> Result<()> {
                         }
                         last_report = std::time::Instant::now();
                     }
+
+                    // Flush logs every 30 seconds during encoding
+                    if last_log_flush.elapsed() >= std::time::Duration::from_secs(30) {
+                        if let Some(ref logger) = rlog_clone {
+                            logger.flush().await;
+                        }
+                        last_log_flush = std::time::Instant::now();
+                    }
                 }
             }
             info!("Finished reading FFmpeg progress. Total progress blocks: {}", progress_count);
+            if let Some(ref logger) = rlog_clone {
+                logger.info(format!("Finished reading FFmpeg progress. Total progress blocks: {}", progress_count));
+                logger.flush().await;
+            }
         } else {
             warn!("No stdout available from FFmpeg process");
+            if let Some(ref logger) = rlog_clone {
+                logger.warn("No stdout available from FFmpeg process");
+            }
         }
     });
 
