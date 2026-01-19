@@ -265,6 +265,37 @@
         .status-completed { background: #4ade8033; color: #4ade80; }
         .status-failed { background: #ef444433; color: #ef4444; }
 
+        .job-progress {
+            margin-top: 8px;
+        }
+
+        .progress-bar {
+            height: 6px;
+            background: #1a1a2e;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-bottom: 4px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4a9eff, #8b5cf6);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        .progress-info {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            color: #888;
+        }
+
+        .progress-stage {
+            color: #4a9eff;
+            font-weight: 500;
+        }
+
         .loading {
             display: inline-block;
             width: 16px;
@@ -627,15 +658,28 @@
             }
 
             listEl.innerHTML = jobs.map(job => `
-                <div class="job-item">
-                    <span class="job-status-badge status-${job.status}">${job.status}</span>
-                    <div style="flex:1;">
-                        <div style="font-size:13px; font-weight:500;">${job.video_path.split('/').pop()}</div>
-                        <div style="font-size:11px; color:#888;">${new Date(job.created_at).toLocaleString()}</div>
+                <div class="job-item" style="flex-direction: column; align-items: stretch;">
+                    <div style="display: flex; align-items: center; gap: 15px;">
+                        <span class="job-status-badge status-${job.status.toLowerCase()}">${job.status}</span>
+                        <div style="flex:1;">
+                            <div style="font-size:13px; font-weight:500;">${job.video_path.split('/').pop()}</div>
+                            <div style="font-size:11px; color:#888;">${new Date(job.created_at).toLocaleString()}</div>
+                        </div>
+                        <div style="font-size:11px; color:#888;">
+                            ${job.selection.presentation}/${job.selection.slides}
+                        </div>
                     </div>
-                    <div style="font-size:11px; color:#888;">
-                        ${job.selection.presentation}/${job.selection.slides}
-                    </div>
+                    ${job.status === 'Processing' && job.progress ? `
+                        <div class="job-progress">
+                            <div class="progress-bar">
+                                <div class="progress-bar-fill" style="width: ${job.progress.percent || 0}%"></div>
+                            </div>
+                            <div class="progress-info">
+                                <span class="progress-stage">${job.progress.stage || 'Processing'}</span>
+                                <span>${job.progress.time || ''} ${job.progress.speed ? '@ ' + job.progress.speed : ''}</span>
+                            </div>
+                        </div>
+                    ` : ''}
                 </div>
             `).join('');
         }
@@ -700,12 +744,12 @@
             if (e.key === 'ArrowLeft') prevImage({ stopPropagation: () => {} });
         });
 
-        // Auto-refresh jobs every 10 seconds
+        // Auto-refresh jobs every 3 seconds for progress updates
         setInterval(() => {
             if (!document.getElementById('jobs-tab').classList.contains('hidden')) {
                 loadJobs();
             }
-        }, 10000);
+        }, 3000);
     </script>
 </body>
 </html>
