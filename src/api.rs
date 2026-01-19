@@ -1,4 +1,4 @@
-use crate::jobs::{Job, JobQueue, JobStatus, Quadrant, VideoQuadrantSelection, WebDavConfig};
+use crate::jobs::{Job, JobProgress, JobQueue, JobStatus, Quadrant, VideoQuadrantSelection, WebDavConfig};
 use crate::webdav::WebDavClient;
 use anyhow::Result;
 use axum::{
@@ -89,6 +89,7 @@ pub async fn run_server(port: u16, data_dir: &str) -> Result<()> {
         .route("/api/jobs/{id}", patch(update_job))
         .route("/api/jobs/pending", get(get_pending_job))
         .route("/api/jobs/claim", post(claim_job))
+        .route("/api/jobs/{id}/progress", patch(update_job_progress))
         .route("/health", get(health_check))
         // Static files for worker provisioning
         .route("/assets/worker", get(serve_worker_binary))
@@ -401,6 +402,55 @@ async fn claim_job(
             AppError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 message: format!("Failed to claim job: {}", e),
+            }.into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateProgressRequest {
+    #[serde(default)]
+    frame: Option<u64>,
+    #[serde(default)]
+    total_frames: Option<u64>,
+    #[serde(default)]
+    time: Option<String>,
+    #[serde(default)]
+    duration: Option<String>,
+    #[serde(default)]
+    speed: Option<String>,
+    #[serde(default)]
+    percent: Option<f32>,
+    #[serde(default)]
+    stage: Option<String>,
+}
+
+/// Update progress for a job
+async fn update_job_progress(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateProgressRequest>,
+) -> Response {
+    let progress = JobProgress {
+        frame: req.frame,
+        total_frames: req.total_frames,
+        time: req.time,
+        duration: req.duration,
+        speed: req.speed,
+        percent: req.percent,
+        stage: req.stage,
+    };
+
+    let queue = state.queue.lock().unwrap();
+    match queue.update_job_progress(&id, progress) {
+        Ok(job) => {
+            Json(job).into_response()
+        }
+        Err(e) => {
+            error!("Failed to update job progress: {}", e);
+            AppError {
+                status: StatusCode::NOT_FOUND,
+                message: format!("Job not found: {}", e),
             }.into_response()
         }
     }

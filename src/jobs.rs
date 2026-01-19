@@ -52,6 +52,24 @@ pub struct VideoQuadrantSelection {
     pub slides: Quadrant,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JobProgress {
+    /// Current frame being processed
+    pub frame: Option<u64>,
+    /// Total frames (if known)
+    pub total_frames: Option<u64>,
+    /// Current time position in the video (e.g., "00:01:23.45")
+    pub time: Option<String>,
+    /// Total duration (e.g., "00:10:00.00")
+    pub duration: Option<String>,
+    /// Processing speed (e.g., "1.5x")
+    pub speed: Option<String>,
+    /// Percentage complete (0-100)
+    pub percent: Option<f32>,
+    /// Current stage of processing
+    pub stage: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
@@ -65,6 +83,8 @@ pub struct Job {
     pub error: Option<String>,
     pub worker_id: Option<String>,
     pub webdav_config: WebDavConfig,
+    #[serde(default)]
+    pub progress: Option<JobProgress>,
 }
 
 pub struct JobQueue {
@@ -126,6 +146,7 @@ impl JobQueue {
             error: None,
             worker_id: None,
             webdav_config,
+            progress: None,
         };
 
         jobs.push(job.clone());
@@ -204,6 +225,21 @@ impl JobQueue {
             None => Ok(None),
         }
     }
+
+    /// Update progress for a job
+    pub fn update_job_progress(&self, job_id: &str, progress: JobProgress) -> Result<Job> {
+        let mut jobs = self.load_jobs()?;
+        let job = jobs
+            .iter_mut()
+            .find(|j| j.id == job_id)
+            .ok_or_else(|| anyhow::anyhow!("Job not found: {}", job_id))?;
+
+        job.progress = Some(progress);
+        let job = job.clone();
+        self.save_jobs(&jobs)?;
+
+        Ok(job)
+    }
 }
 
 pub async fn run_worker(queue_url: String) -> Result<()> {
@@ -235,7 +271,7 @@ pub async fn run_worker(queue_url: String) -> Result<()> {
 }
 
 async fn claim_job(queue_url: &str, worker_id: &str) -> Result<Option<Job>> {
-    let url = format!("{}/api/jobs/claim", queue_url);
+    let url = format!("{}/jobs/claim", queue_url);
     info!("Claiming job at: {}", url);
 
     let client = reqwest::Client::new();
@@ -313,11 +349,21 @@ async fn process_job(job: Job) -> Result<()> {
     let local_output_path = format!("{}/output.mp4", temp_dir);
     info!("Local output path: {}", local_output_path);
 
+    // Report initial progress
+    if let Some(queue_url) = &job.webdav_config.queue_url {
+        let _ = update_job_progress_remote(queue_url, &job.id, JobProgress {
+            stage: Some("Starting FFmpeg".to_string()),
+            ..Default::default()
+        }).await;
+    }
+
     info!("Starting FFmpeg (output to local file)...");
 
-    // Run FFmpeg command - output to local file first
-    let ffmpeg_result = tokio::process::Command::new("ffmpeg")
+    // Run FFmpeg command with progress parsing
+    // Use -progress pipe:1 to get machine-readable progress on stdout
+    let mut child = tokio::process::Command::new("ffmpeg")
         .arg("-y")  // Overwrite output
+        .arg("-progress").arg("pipe:1")  // Output progress to stdout
         .arg("-i").arg(&video_url)  // Input video (streaming from WebDAV)
         .arg("-i").arg(bg_image_path)  // Background image
         .arg("-filter_complex").arg(&filter_complex)
@@ -329,85 +375,147 @@ async fn process_job(job: Job) -> Result<()> {
         .arg("-threads").arg("0")
         .arg("-c:a").arg("copy")
         .arg(&local_output_path)
-        .output()
-        .await;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
 
-    match ffmpeg_result {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            info!("FFmpeg exit status: {}", output.status);
-            if !stdout.is_empty() {
-                info!("FFmpeg stdout: {}", stdout);
+    // Parse progress from stdout
+    let stdout = child.stdout.take();
+    let queue_url_clone = job.webdav_config.queue_url.clone();
+    let job_id_clone = job.id.clone();
+
+    // Spawn a task to read and parse progress
+    let progress_handle = tokio::spawn(async move {
+        if let Some(stdout) = stdout {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+
+            let mut current_frame: Option<u64> = None;
+            let mut current_time: Option<String> = None;
+            let mut current_speed: Option<String> = None;
+            let mut total_duration: Option<String> = None;
+            let mut last_report = std::time::Instant::now();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                // Parse FFmpeg progress output format:
+                // frame=123
+                // fps=30.0
+                // out_time=00:00:05.123456
+                // speed=1.5x
+                // progress=continue/end
+
+                if let Some(value) = line.strip_prefix("frame=") {
+                    current_frame = value.trim().parse().ok();
+                } else if let Some(value) = line.strip_prefix("out_time=") {
+                    // Format: 00:00:05.123456 - trim to 00:00:05
+                    let time = value.trim();
+                    if let Some(dot_pos) = time.rfind('.') {
+                        current_time = Some(time[..dot_pos].to_string());
+                    } else {
+                        current_time = Some(time.to_string());
+                    }
+                } else if let Some(value) = line.strip_prefix("speed=") {
+                    current_speed = Some(value.trim().to_string());
+                } else if let Some(value) = line.strip_prefix("duration=") {
+                    total_duration = Some(value.trim().to_string());
+                } else if line.starts_with("progress=") {
+                    // End of a progress block - report to server (throttled)
+                    if last_report.elapsed() >= std::time::Duration::from_secs(2) {
+                        if let Some(queue_url) = &queue_url_clone {
+                            let progress = JobProgress {
+                                frame: current_frame,
+                                total_frames: None,
+                                time: current_time.clone(),
+                                duration: total_duration.clone(),
+                                speed: current_speed.clone(),
+                                percent: None, // Could calculate from time/duration
+                                stage: Some("Encoding".to_string()),
+                            };
+                            let _ = update_job_progress_remote(queue_url, &job_id_clone, progress).await;
+                        }
+                        last_report = std::time::Instant::now();
+                    }
+                }
             }
-            if !stderr.is_empty() {
-                info!("FFmpeg stderr: {}", stderr);
+        }
+    });
+
+    // Wait for FFmpeg to complete
+    let output = child.wait_with_output().await?;
+
+    // Wait for progress parsing to finish
+    let _ = progress_handle.await;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    info!("FFmpeg exit status: {}", output.status);
+    if !stderr.is_empty() {
+        info!("FFmpeg stderr: {}", stderr);
+    }
+
+    if output.status.success() {
+        info!("FFmpeg processing successful!");
+
+        // Report upload stage
+        if let Some(queue_url) = &job.webdav_config.queue_url {
+            let _ = update_job_progress_remote(queue_url, &job.id, JobProgress {
+                stage: Some("Uploading".to_string()),
+                ..Default::default()
+            }).await;
+        }
+
+        // Check output file size
+        match fs::metadata(&local_output_path) {
+            Ok(meta) => info!("Output file size: {} bytes", meta.len()),
+            Err(e) => error!("Failed to stat output file: {}", e),
+        }
+
+        // Now upload to WebDAV
+        info!("Reading output file for upload...");
+        let output_data = fs::read(&local_output_path)?;
+        info!("Read {} bytes, uploading to WebDAV...", output_data.len());
+
+        let dav_client = WebDavClient::new(&job.webdav_config)?;
+
+        // Create the output folder on WebDAV if needed
+        // job.output_path is like "processed/filename.mp4"
+        if let Some(folder_end) = job.output_path.rfind('/') {
+            let folder = &job.output_path[..folder_end];
+            if !folder.is_empty() {
+                info!("Ensuring folder exists: {}", folder);
+                if let Err(e) = dav_client.ensure_folder_exists(folder).await {
+                    warn!("Could not create folder {}: {} (may already exist)", folder, e);
+                }
             }
+        }
 
-            if output.status.success() {
-                info!("FFmpeg processing successful!");
+        info!("Uploading to: {}", job.output_path);
+        match dav_client.upload_file(&job.output_path, output_data).await {
+            Ok(_) => {
+                info!("Upload successful!");
+                info!("Job {} completed successfully", job.id);
 
-                // Check output file size
-                match fs::metadata(&local_output_path) {
-                    Ok(meta) => info!("Output file size: {} bytes", meta.len()),
-                    Err(e) => error!("Failed to stat output file: {}", e),
-                }
-
-                // Now upload to WebDAV
-                info!("Reading output file for upload...");
-                let output_data = fs::read(&local_output_path)?;
-                info!("Read {} bytes, uploading to WebDAV...", output_data.len());
-
-                let dav_client = WebDavClient::new(&job.webdav_config)?;
-
-                // Create the output folder on WebDAV if needed
-                // job.output_path is like "processed/filename.mp4"
-                if let Some(folder_end) = job.output_path.rfind('/') {
-                    let folder = &job.output_path[..folder_end];
-                    if !folder.is_empty() {
-                        info!("Ensuring folder exists: {}", folder);
-                        if let Err(e) = dav_client.ensure_folder_exists(folder).await {
-                            warn!("Could not create folder {}: {} (may already exist)", folder, e);
-                        }
+                // Update job to completed via queue URL
+                if let Some(queue_url) = &job.webdav_config.queue_url {
+                    info!("Updating job status to completed at: {}", queue_url);
+                    match update_job_status_remote(queue_url, &job.id, JobStatus::Completed, None).await {
+                        Ok(_) => info!("Status update successful"),
+                        Err(e) => error!("Status update failed: {}", e),
                     }
                 }
-
-                info!("Uploading to: {}", job.output_path);
-                match dav_client.upload_file(&job.output_path, output_data).await {
-                    Ok(_) => {
-                        info!("Upload successful!");
-                        info!("Job {} completed successfully", job.id);
-
-                        // Update job to completed via queue URL
-                        if let Some(queue_url) = &job.webdav_config.queue_url {
-                            info!("Updating job status to completed at: {}", queue_url);
-                            match update_job_status_remote(queue_url, &job.id, JobStatus::Completed, None).await {
-                                Ok(_) => info!("Status update successful"),
-                                Err(e) => error!("Status update failed: {}", e),
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Upload FAILED: {}", e);
-                        if let Some(queue_url) = &job.webdav_config.queue_url {
-                            let _ = update_job_status_remote(queue_url, &job.id, JobStatus::Failed, None).await;
-                        }
-                    }
-                }
-            } else {
-                error!("FFmpeg FAILED with exit code: {}", output.status);
-
+            }
+            Err(e) => {
+                error!("Upload FAILED: {}", e);
                 if let Some(queue_url) = &job.webdav_config.queue_url {
                     let _ = update_job_status_remote(queue_url, &job.id, JobStatus::Failed, None).await;
                 }
             }
         }
-        Err(e) => {
-            error!("Failed to run FFmpeg: {}", e);
+    } else {
+        error!("FFmpeg FAILED with exit code: {}", output.status);
 
-            if let Some(queue_url) = &job.webdav_config.queue_url {
-                let _ = update_job_status_remote(queue_url, &job.id, JobStatus::Failed, None).await;
-            }
+        if let Some(queue_url) = &job.webdav_config.queue_url {
+            let _ = update_job_status_remote(queue_url, &job.id, JobStatus::Failed, None).await;
         }
     }
 
@@ -470,6 +578,24 @@ fn build_webdav_download_url(config: &WebDavConfig, path: &str) -> String {
     )
     .replacen("://", &format!("://{}:{}@", encode(&config.username), encode(&config.password)), 1)
 }
+
+async fn update_job_progress_remote(
+    queue_url: &str,
+    job_id: &str,
+    progress: JobProgress,
+) -> Result<()> {
+    let client = reqwest::Client::new();
+
+    client
+        .patch(format!("{}/jobs/{}/progress", queue_url, job_id))
+        .json(&progress)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update job progress: {}", e))?;
+
+    Ok(())
+}
+
 async fn update_job_status_remote(
     queue_url: &str,
     job_id: &str,

@@ -415,11 +415,31 @@ packages:
   - ffmpeg
   - wget
 
+write_files:
+  - path: /etc/systemd/system/ffmpeg-worker.service
+    content: |
+      [Unit]
+      Description=FFmpeg GPC Worker
+      After=network.target
+
+      [Service]
+      Type=simple
+      ExecStart=/opt/worker worker --queue-url {queue_url}
+      Restart=always
+      RestartSec=10
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+
 runcmd:
   - wget -O /root/gpc-bg.png {bg_image_url}
-  - wget -O /tmp/worker {binary_url}
-  - chmod +x /tmp/worker
-  - /tmp/worker worker --queue-url {queue_url}
+  - wget -O /opt/worker {binary_url}
+  - chmod +x /opt/worker
+  - systemctl daemon-reload
+  - systemctl enable ffmpeg-worker
+  - systemctl start ffmpeg-worker
 
 final_message: "FFmpeg worker is ready!"
 "#
@@ -445,11 +465,31 @@ packages:
 ssh_authorized_keys:
   - {ssh_public_key}
 
+write_files:
+  - path: /etc/systemd/system/ffmpeg-worker.service
+    content: |
+      [Unit]
+      Description=FFmpeg GPC Worker
+      After=network.target
+
+      [Service]
+      Type=simple
+      ExecStart=/opt/worker worker --queue-url {queue_url}
+      Restart=always
+      RestartSec=10
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+
 runcmd:
   - wget -O /root/gpc-bg.png {bg_image_url}
-  - wget -O /tmp/worker {binary_url}
-  - chmod +x /tmp/worker
-  - /tmp/worker worker --queue-url {queue_url}
+  - wget -O /opt/worker {binary_url}
+  - chmod +x /opt/worker
+  - systemctl daemon-reload
+  - systemctl enable ffmpeg-worker
+  - systemctl start ffmpeg-worker
 
 final_message: "FFmpeg worker is ready!"
 "#
