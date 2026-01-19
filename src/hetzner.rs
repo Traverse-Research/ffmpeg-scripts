@@ -43,6 +43,7 @@ pub struct PublicNet {
     pub ipv4: Ipv4,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IpAddress {
     pub ip: String,
@@ -89,11 +90,13 @@ struct CreateServerResponse {
     server: Server,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ErrorResponse {
     error: ErrorDetail,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ErrorDetail {
     message: String,
@@ -338,7 +341,9 @@ impl HetznerClient {
         #[derive(Debug, Deserialize)]
         struct ServerTypesAvailable {
             available: Vec<u64>,
+            #[allow(dead_code)]
             available_for_migration: Vec<u64>,
+            #[allow(dead_code)]
             supported: Vec<u64>,
         }
 
@@ -370,6 +375,7 @@ impl HetznerClient {
             .collect())
     }
 
+    #[allow(dead_code)]
     pub async fn get_server(&self, id: u64) -> Result<Server> {
         let url = format!("{}/servers/{}", HETZNER_API_BASE, id);
 
@@ -448,6 +454,7 @@ final_message: "FFmpeg worker is ready!"
 }
 
 /// Cloud-init config with SSH key access
+#[allow(dead_code)]
 pub fn worker_cloud_init_with_ssh(
     queue_url: &str,
     binary_url: &str,
