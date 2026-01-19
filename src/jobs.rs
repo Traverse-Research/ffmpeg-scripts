@@ -316,7 +316,7 @@ impl RemoteLogger {
         }
 
         let client = reqwest::Client::new();
-        let url = format!("{}/jobs/{}/logs", self.queue_url, self.job_id);
+        let url = format!("{}/api/jobs/{}/logs", self.queue_url, self.job_id);
 
         #[derive(Serialize)]
         struct LogsPayload {
@@ -811,7 +811,7 @@ async fn update_job_progress_remote(
     let client = reqwest::Client::new();
 
     client
-        .patch(format!("{}/jobs/{}/progress", queue_url, job_id))
+        .patch(format!("{}/api/jobs/{}/progress", queue_url, job_id))
         .json(&progress)
         .send()
         .await
@@ -845,7 +845,7 @@ async fn update_job_status_remote(
     };
 
     client
-        .patch(format!("{}/jobs/{}", queue_url, job_id))
+        .patch(format!("{}/api/jobs/{}", queue_url, job_id))
         .json(&update)
         .send()
         .await
