@@ -296,6 +296,63 @@
             font-weight: 500;
         }
 
+        .job-logs-toggle {
+            background: none;
+            border: none;
+            color: #4a9eff;
+            cursor: pointer;
+            font-size: 12px;
+            padding: 4px 8px;
+            margin-top: 8px;
+        }
+
+        .job-logs-toggle:hover {
+            text-decoration: underline;
+        }
+
+        .job-logs {
+            margin-top: 10px;
+            background: #0a0a14;
+            border-radius: 6px;
+            padding: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 11px;
+            line-height: 1.5;
+        }
+
+        .job-logs.hidden {
+            display: none;
+        }
+
+        .log-entry {
+            display: flex;
+            gap: 8px;
+        }
+
+        .log-timestamp {
+            color: #666;
+            flex-shrink: 0;
+        }
+
+        .log-level {
+            flex-shrink: 0;
+            padding: 0 4px;
+            border-radius: 2px;
+            font-weight: 500;
+        }
+
+        .log-level-INFO { color: #4a9eff; }
+        .log-level-WARN { color: #ffd700; }
+        .log-level-ERROR { color: #ef4444; }
+        .log-level-DEBUG { color: #888; }
+
+        .log-message {
+            color: #ccc;
+            word-break: break-all;
+        }
+
         .loading {
             display: inline-block;
             width: 16px;
@@ -680,8 +737,47 @@
                             </div>
                         </div>
                     ` : ''}
+                    ${job.logs && job.logs.length > 0 ? `
+                        <button class="job-logs-toggle" onclick="toggleLogs('${job.id}')">
+                            Show logs (${job.logs.length} entries)
+                        </button>
+                        <div class="job-logs hidden" id="logs-${job.id}">
+                            ${job.logs.map(log => `
+                                <div class="log-entry">
+                                    <span class="log-timestamp">${formatLogTimestamp(log.timestamp)}</span>
+                                    <span class="log-level log-level-${log.level}">${log.level}</span>
+                                    <span class="log-message">${escapeHtml(log.message)}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : ''}
                 </div>
             `).join('');
+        }
+
+        function toggleLogs(jobId) {
+            const logsEl = document.getElementById(`logs-${jobId}`);
+            const toggleEl = logsEl.previousElementSibling;
+            if (logsEl.classList.contains('hidden')) {
+                logsEl.classList.remove('hidden');
+                toggleEl.textContent = toggleEl.textContent.replace('Show', 'Hide');
+                // Scroll to bottom to show latest logs
+                logsEl.scrollTop = logsEl.scrollHeight;
+            } else {
+                logsEl.classList.add('hidden');
+                toggleEl.textContent = toggleEl.textContent.replace('Hide', 'Show');
+            }
+        }
+
+        function formatLogTimestamp(timestamp) {
+            const date = new Date(timestamp);
+            return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
         }
 
         function formatBytes(bytes) {
