@@ -396,6 +396,9 @@ async fn process_job(job: Job) -> Result<()> {
             let mut current_speed: Option<String> = None;
             let mut total_duration: Option<String> = None;
             let mut last_report = std::time::Instant::now();
+            let mut progress_count = 0u32;
+
+            info!("Starting to read FFmpeg progress from stdout...");
 
             while let Ok(Some(line)) = lines.next_line().await {
                 // Parse FFmpeg progress output format:
@@ -420,9 +423,12 @@ async fn process_job(job: Job) -> Result<()> {
                 } else if let Some(value) = line.strip_prefix("duration=") {
                     total_duration = Some(value.trim().to_string());
                 } else if line.starts_with("progress=") {
+                    progress_count += 1;
                     // End of a progress block - report to server (throttled)
                     if last_report.elapsed() >= std::time::Duration::from_secs(2) {
                         if let Some(queue_url) = &queue_url_clone {
+                            info!("Sending progress update #{}: frame={:?}, time={:?}, speed={:?}",
+                                  progress_count, current_frame, current_time, current_speed);
                             let progress = JobProgress {
                                 frame: current_frame,
                                 total_frames: None,
@@ -432,28 +438,50 @@ async fn process_job(job: Job) -> Result<()> {
                                 percent: None, // Could calculate from time/duration
                                 stage: Some("Encoding".to_string()),
                             };
-                            let _ = update_job_progress_remote(queue_url, &job_id_clone, progress).await;
+                            match update_job_progress_remote(queue_url, &job_id_clone, progress).await {
+                                Ok(_) => info!("Progress update sent successfully"),
+                                Err(e) => error!("Failed to send progress update: {}", e),
+                            }
                         }
                         last_report = std::time::Instant::now();
                     }
                 }
             }
+            info!("Finished reading FFmpeg progress. Total progress blocks: {}", progress_count);
+        } else {
+            warn!("No stdout available from FFmpeg process");
         }
     });
 
+    // Read stderr in a separate task
+    let stderr_handle = {
+        let stderr = child.stderr.take();
+        tokio::spawn(async move {
+            if let Some(stderr) = stderr {
+                use tokio::io::AsyncReadExt;
+                let mut buf = String::new();
+                let mut reader = tokio::io::BufReader::new(stderr);
+                let _ = reader.read_to_string(&mut buf).await;
+                buf
+            } else {
+                String::new()
+            }
+        })
+    };
+
     // Wait for FFmpeg to complete
-    let output = child.wait_with_output().await?;
+    let status = child.wait().await?;
 
-    // Wait for progress parsing to finish
+    // Wait for progress parsing and stderr reading to finish
     let _ = progress_handle.await;
+    let stderr = stderr_handle.await.unwrap_or_default();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    info!("FFmpeg exit status: {}", output.status);
+    info!("FFmpeg exit status: {}", status);
     if !stderr.is_empty() {
         info!("FFmpeg stderr: {}", stderr);
     }
 
-    if output.status.success() {
+    if status.success() {
         info!("FFmpeg processing successful!");
 
         // Report upload stage
@@ -512,7 +540,7 @@ async fn process_job(job: Job) -> Result<()> {
             }
         }
     } else {
-        error!("FFmpeg FAILED with exit code: {}", output.status);
+        error!("FFmpeg FAILED with exit code: {}", status);
 
         if let Some(queue_url) = &job.webdav_config.queue_url {
             let _ = update_job_status_remote(queue_url, &job.id, JobStatus::Failed, None).await;

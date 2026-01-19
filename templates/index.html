@@ -669,14 +669,14 @@
                             ${job.selection.presentation}/${job.selection.slides}
                         </div>
                     </div>
-                    ${job.status === 'Processing' && job.progress ? `
+                    ${job.status === 'Processing' ? `
                         <div class="job-progress">
                             <div class="progress-bar">
-                                <div class="progress-bar-fill" style="width: ${job.progress.percent || 0}%"></div>
+                                <div class="progress-bar-fill" style="width: ${job.progress?.percent || 0}%"></div>
                             </div>
                             <div class="progress-info">
-                                <span class="progress-stage">${job.progress.stage || 'Processing'}</span>
-                                <span>${job.progress.time || ''} ${job.progress.speed ? '@ ' + job.progress.speed : ''}</span>
+                                <span class="progress-stage">${job.progress?.stage || 'Waiting for progress...'}</span>
+                                <span>${job.progress?.time || ''} ${job.progress?.speed ? '@ ' + job.progress.speed : ''}</span>
                             </div>
                         </div>
                     ` : ''}
