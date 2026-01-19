@@ -1,4 +1,4 @@
-use crate::jobs::{Job, JobProgress, JobQueue, JobStatus, Quadrant, VideoQuadrantSelection, WebDavConfig};
+use crate::jobs::{Job, JobProgress, JobQueue, JobStatus, LogEntry, Quadrant, VideoQuadrantSelection, WebDavConfig};
 use crate::webdav::WebDavClient;
 use anyhow::Result;
 use axum::{
@@ -90,6 +90,7 @@ pub async fn run_server(port: u16, data_dir: &str) -> Result<()> {
         .route("/api/jobs/pending", get(get_pending_job))
         .route("/api/jobs/claim", post(claim_job))
         .route("/api/jobs/{id}/progress", patch(update_job_progress))
+        .route("/api/jobs/{id}/logs", post(append_job_logs))
         .route("/health", get(health_check))
         // Static files for worker provisioning
         .route("/assets/worker", get(serve_worker_binary))
@@ -448,6 +449,49 @@ async fn update_job_progress(
         }
         Err(e) => {
             error!("Failed to update job progress: {}", e);
+            AppError {
+                status: StatusCode::NOT_FOUND,
+                message: format!("Job not found: {}", e),
+            }.into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AppendLogsRequest {
+    logs: Vec<LogEntryRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogEntryRequest {
+    timestamp: String,
+    level: String,
+    message: String,
+}
+
+/// Append log entries to a job
+async fn append_job_logs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AppendLogsRequest>,
+) -> Response {
+    let logs: Vec<LogEntry> = req.logs.into_iter().map(|l| {
+        LogEntry {
+            timestamp: chrono::DateTime::parse_from_rfc3339(&l.timestamp)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now()),
+            level: l.level,
+            message: l.message,
+        }
+    }).collect();
+
+    let queue = state.queue.lock().unwrap();
+    match queue.append_job_logs(&id, logs) {
+        Ok(_) => {
+            StatusCode::OK.into_response()
+        }
+        Err(e) => {
+            error!("Failed to append job logs: {}", e);
             AppError {
                 status: StatusCode::NOT_FOUND,
                 message: format!("Job not found: {}", e),

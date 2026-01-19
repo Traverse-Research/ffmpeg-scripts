@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::sync::{Arc, Mutex};
 use tokio::time::{interval, Duration};
 use tracing::{info, warn, error};
 use urlencoding::encode;
@@ -71,6 +72,13 @@ pub struct JobProgress {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub timestamp: DateTime<Utc>,
+    pub level: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
     pub video_path: String,
@@ -85,6 +93,8 @@ pub struct Job {
     pub webdav_config: WebDavConfig,
     #[serde(default)]
     pub progress: Option<JobProgress>,
+    #[serde(default)]
+    pub logs: Vec<LogEntry>,
 }
 
 pub struct JobQueue {
@@ -147,6 +157,7 @@ impl JobQueue {
             worker_id: None,
             webdav_config,
             progress: None,
+            logs: Vec::new(),
         };
 
         jobs.push(job.clone());
@@ -240,6 +251,113 @@ impl JobQueue {
 
         Ok(job)
     }
+
+    /// Append log entries to a job
+    pub fn append_job_logs(&self, job_id: &str, new_logs: Vec<LogEntry>) -> Result<Job> {
+        let mut jobs = self.load_jobs()?;
+        let job = jobs
+            .iter_mut()
+            .find(|j| j.id == job_id)
+            .ok_or_else(|| anyhow::anyhow!("Job not found: {}", job_id))?;
+
+        job.logs.extend(new_logs);
+        // Keep only the last 1000 log entries to prevent unbounded growth
+        if job.logs.len() > 1000 {
+            job.logs = job.logs.split_off(job.logs.len() - 1000);
+        }
+        let job = job.clone();
+        self.save_jobs(&jobs)?;
+
+        Ok(job)
+    }
+}
+
+/// A logger that buffers log entries and sends them to the server periodically
+#[derive(Clone)]
+pub struct RemoteLogger {
+    queue_url: String,
+    job_id: String,
+    buffer: Arc<Mutex<Vec<LogEntry>>>,
+}
+
+impl RemoteLogger {
+    pub fn new(queue_url: String, job_id: String) -> Self {
+        Self {
+            queue_url,
+            job_id,
+            buffer: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Add a log entry to the buffer
+    pub fn log(&self, level: &str, message: String) {
+        let entry = LogEntry {
+            timestamp: Utc::now(),
+            level: level.to_string(),
+            message,
+        };
+        if let Ok(mut buffer) = self.buffer.lock() {
+            buffer.push(entry);
+        }
+    }
+
+    /// Flush buffered logs to the server
+    pub async fn flush(&self) {
+        let logs = {
+            let mut buffer = match self.buffer.lock() {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+            std::mem::take(&mut *buffer)
+        };
+
+        if logs.is_empty() {
+            return;
+        }
+
+        let client = reqwest::Client::new();
+        let url = format!("{}/jobs/{}/logs", self.queue_url, self.job_id);
+
+        #[derive(Serialize)]
+        struct LogsPayload {
+            logs: Vec<LogPayload>,
+        }
+
+        #[derive(Serialize)]
+        struct LogPayload {
+            timestamp: String,
+            level: String,
+            message: String,
+        }
+
+        let payload = LogsPayload {
+            logs: logs.iter().map(|l| LogPayload {
+                timestamp: l.timestamp.to_rfc3339(),
+                level: l.level.clone(),
+                message: l.message.clone(),
+            }).collect(),
+        };
+
+        // Fire and forget - don't block on this
+        let _ = client.post(&url).json(&payload).send().await;
+    }
+
+    /// Helper macros-like methods
+    pub fn info(&self, msg: impl Into<String>) {
+        self.log("INFO", msg.into());
+    }
+
+    pub fn warn(&self, msg: impl Into<String>) {
+        self.log("WARN", msg.into());
+    }
+
+    pub fn error(&self, msg: impl Into<String>) {
+        self.log("ERROR", msg.into());
+    }
+
+    pub fn debug(&self, msg: impl Into<String>) {
+        self.log("DEBUG", msg.into());
+    }
 }
 
 pub async fn run_worker(queue_url: String) -> Result<()> {
@@ -304,50 +422,88 @@ async fn claim_job(queue_url: &str, worker_id: &str) -> Result<Option<Job>> {
 }
 
 async fn process_job(job: Job) -> Result<()> {
-    info!("=== PROCESSING JOB START ===");
-    info!("Job ID: {}", job.id);
-    info!("Video path: {}", job.video_path);
-    info!("Output path: {}", job.output_path);
-    info!("Selection: {:?}", job.selection);
-    info!("WebDAV URL: {}", job.webdav_config.url);
-    info!("Queue URL: {:?}", job.webdav_config.queue_url);
+    // Create remote logger if we have a queue URL
+    let rlog = job.webdav_config.queue_url.as_ref().map(|url| {
+        RemoteLogger::new(url.clone(), job.id.clone())
+    });
+
+    // Helper macro to log to both local and remote
+    macro_rules! log_both {
+        (info, $($arg:tt)*) => {{
+            let msg = format!($($arg)*);
+            info!("{}", msg);
+            if let Some(ref logger) = rlog {
+                logger.info(&msg);
+            }
+        }};
+        (warn, $($arg:tt)*) => {{
+            let msg = format!($($arg)*);
+            warn!("{}", msg);
+            if let Some(ref logger) = rlog {
+                logger.warn(&msg);
+            }
+        }};
+        (error, $($arg:tt)*) => {{
+            let msg = format!($($arg)*);
+            error!("{}", msg);
+            if let Some(ref logger) = rlog {
+                logger.error(&msg);
+            }
+        }};
+    }
+
+    log_both!(info, "=== PROCESSING JOB START ===");
+    log_both!(info, "Job ID: {}", job.id);
+    log_both!(info, "Video path: {}", job.video_path);
+    log_both!(info, "Output path: {}", job.output_path);
+    log_both!(info, "Selection: {:?}", job.selection);
+
+    // Flush initial logs
+    if let Some(ref logger) = rlog {
+        logger.flush().await;
+    }
 
     let worker_id = format!("worker-{}", uuid::Uuid::new_v4().simple());
     let temp_dir = format!("/tmp/worker-{}", worker_id);
-    info!("Creating temp dir: {}", temp_dir);
+    log_both!(info, "Creating temp dir: {}", temp_dir);
     fs::create_dir_all(&temp_dir)?;
 
     // Build input URL with auth for direct FFmpeg streaming
     let video_url = build_webdav_download_url(&job.webdav_config, &job.video_path);
-    info!("Video URL for FFmpeg: {}", video_url);
+    log_both!(info, "Video URL for FFmpeg: {}", video_url);
 
     // Background image path (downloaded by cloud-init to /root)
     let bg_image_path = "/root/gpc-bg.png";
-    info!("Background image path: {}", bg_image_path);
+    log_both!(info, "Background image path: {}", bg_image_path);
 
     // Check if background image exists
     if std::path::Path::new(bg_image_path).exists() {
-        info!("Background image exists at {}", bg_image_path);
+        log_both!(info, "Background image exists at {}", bg_image_path);
     } else {
-        error!("Background image NOT FOUND at {}", bg_image_path);
+        log_both!(error, "Background image NOT FOUND at {}", bg_image_path);
         // Try to list /root to see what's there
         if let Ok(entries) = std::fs::read_dir("/root") {
-            info!("Contents of /root:");
+            log_both!(info, "Contents of /root:");
             for entry in entries {
                 if let Ok(e) = entry {
-                    info!("  - {:?}", e.path());
+                    log_both!(info, "  - {:?}", e.path());
                 }
             }
         }
     }
 
+    // Flush logs before starting FFmpeg
+    if let Some(ref logger) = rlog {
+        logger.flush().await;
+    }
+
     // Build FFmpeg filter complex based on quadrant selection
     let filter_complex = build_filter_complex(&job.selection)?;
-    info!("FFmpeg filter: {}", filter_complex);
+    log_both!(info, "FFmpeg filter: {}", filter_complex);
 
     // Local output path for FFmpeg
     let local_output_path = format!("{}/output.mp4", temp_dir);
-    info!("Local output path: {}", local_output_path);
+    log_both!(info, "Local output path: {}", local_output_path);
 
     // Report initial progress
     if let Some(queue_url) = &job.webdav_config.queue_url {
@@ -357,7 +513,7 @@ async fn process_job(job: Job) -> Result<()> {
         }).await;
     }
 
-    info!("Starting FFmpeg (output to local file)...");
+    log_both!(info, "Starting FFmpeg (output to local file)...");
 
     // Run FFmpeg command with progress parsing
     // Use -progress pipe:1 to get machine-readable progress on stdout
@@ -383,6 +539,7 @@ async fn process_job(job: Job) -> Result<()> {
     let stdout = child.stdout.take();
     let queue_url_clone = job.webdav_config.queue_url.clone();
     let job_id_clone = job.id.clone();
+    let rlog_clone = rlog.clone();
 
     // Spawn a task to read and parse progress
     let progress_handle = tokio::spawn(async move {
@@ -396,6 +553,13 @@ async fn process_job(job: Job) -> Result<()> {
             let mut current_speed: Option<String> = None;
             let mut total_duration: Option<String> = None;
             let mut last_report = std::time::Instant::now();
+            let mut last_log_flush = std::time::Instant::now();
+            let mut progress_count = 0u32;
+
+            info!("Starting to read FFmpeg progress from stdout...");
+            if let Some(ref logger) = rlog_clone {
+                logger.info("Starting to read FFmpeg progress from stdout...");
+            }
 
             while let Ok(Some(line)) = lines.next_line().await {
                 // Parse FFmpeg progress output format:
@@ -420,9 +584,16 @@ async fn process_job(job: Job) -> Result<()> {
                 } else if let Some(value) = line.strip_prefix("duration=") {
                     total_duration = Some(value.trim().to_string());
                 } else if line.starts_with("progress=") {
+                    progress_count += 1;
                     // End of a progress block - report to server (throttled)
                     if last_report.elapsed() >= std::time::Duration::from_secs(2) {
                         if let Some(queue_url) = &queue_url_clone {
+                            let msg = format!("Progress update #{}: frame={:?}, time={:?}, speed={:?}",
+                                  progress_count, current_frame, current_time, current_speed);
+                            info!("{}", msg);
+                            if let Some(ref logger) = rlog_clone {
+                                logger.info(&msg);
+                            }
                             let progress = JobProgress {
                                 frame: current_frame,
                                 total_frames: None,
@@ -432,29 +603,71 @@ async fn process_job(job: Job) -> Result<()> {
                                 percent: None, // Could calculate from time/duration
                                 stage: Some("Encoding".to_string()),
                             };
-                            let _ = update_job_progress_remote(queue_url, &job_id_clone, progress).await;
+                            match update_job_progress_remote(queue_url, &job_id_clone, progress).await {
+                                Ok(_) => info!("Progress update sent successfully"),
+                                Err(e) => error!("Failed to send progress update: {}", e),
+                            }
                         }
                         last_report = std::time::Instant::now();
                     }
+
+                    // Flush logs every 30 seconds during encoding
+                    if last_log_flush.elapsed() >= std::time::Duration::from_secs(30) {
+                        if let Some(ref logger) = rlog_clone {
+                            logger.flush().await;
+                        }
+                        last_log_flush = std::time::Instant::now();
+                    }
                 }
+            }
+            info!("Finished reading FFmpeg progress. Total progress blocks: {}", progress_count);
+            if let Some(ref logger) = rlog_clone {
+                logger.info(format!("Finished reading FFmpeg progress. Total progress blocks: {}", progress_count));
+                logger.flush().await;
+            }
+        } else {
+            warn!("No stdout available from FFmpeg process");
+            if let Some(ref logger) = rlog_clone {
+                logger.warn("No stdout available from FFmpeg process");
             }
         }
     });
 
+    // Read stderr in a separate task
+    let stderr_handle = {
+        let stderr = child.stderr.take();
+        tokio::spawn(async move {
+            if let Some(stderr) = stderr {
+                use tokio::io::AsyncReadExt;
+                let mut buf = String::new();
+                let mut reader = tokio::io::BufReader::new(stderr);
+                let _ = reader.read_to_string(&mut buf).await;
+                buf
+            } else {
+                String::new()
+            }
+        })
+    };
+
     // Wait for FFmpeg to complete
-    let output = child.wait_with_output().await?;
+    let status = child.wait().await?;
 
-    // Wait for progress parsing to finish
+    // Wait for progress parsing and stderr reading to finish
     let _ = progress_handle.await;
+    let stderr = stderr_handle.await.unwrap_or_default();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    info!("FFmpeg exit status: {}", output.status);
+    log_both!(info, "FFmpeg exit status: {}", status);
     if !stderr.is_empty() {
-        info!("FFmpeg stderr: {}", stderr);
+        log_both!(info, "FFmpeg stderr: {}", stderr);
     }
 
-    if output.status.success() {
-        info!("FFmpeg processing successful!");
+    // Flush logs after FFmpeg completes
+    if let Some(ref logger) = rlog {
+        logger.flush().await;
+    }
+
+    if status.success() {
+        log_both!(info, "FFmpeg processing successful!");
 
         // Report upload stage
         if let Some(queue_url) = &job.webdav_config.queue_url {
@@ -466,14 +679,14 @@ async fn process_job(job: Job) -> Result<()> {
 
         // Check output file size
         match fs::metadata(&local_output_path) {
-            Ok(meta) => info!("Output file size: {} bytes", meta.len()),
-            Err(e) => error!("Failed to stat output file: {}", e),
+            Ok(meta) => log_both!(info, "Output file size: {} bytes", meta.len()),
+            Err(e) => log_both!(error, "Failed to stat output file: {}", e),
         }
 
         // Now upload to WebDAV
-        info!("Reading output file for upload...");
+        log_both!(info, "Reading output file for upload...");
         let output_data = fs::read(&local_output_path)?;
-        info!("Read {} bytes, uploading to WebDAV...", output_data.len());
+        log_both!(info, "Read {} bytes, uploading to WebDAV...", output_data.len());
 
         let dav_client = WebDavClient::new(&job.webdav_config)?;
 
@@ -482,48 +695,59 @@ async fn process_job(job: Job) -> Result<()> {
         if let Some(folder_end) = job.output_path.rfind('/') {
             let folder = &job.output_path[..folder_end];
             if !folder.is_empty() {
-                info!("Ensuring folder exists: {}", folder);
+                log_both!(info, "Ensuring folder exists: {}", folder);
                 if let Err(e) = dav_client.ensure_folder_exists(folder).await {
-                    warn!("Could not create folder {}: {} (may already exist)", folder, e);
+                    log_both!(warn, "Could not create folder {}: {} (may already exist)", folder, e);
                 }
             }
         }
 
-        info!("Uploading to: {}", job.output_path);
+        log_both!(info, "Uploading to: {}", job.output_path);
         match dav_client.upload_file(&job.output_path, output_data).await {
             Ok(_) => {
-                info!("Upload successful!");
-                info!("Job {} completed successfully", job.id);
+                log_both!(info, "Upload successful!");
+                log_both!(info, "Job {} completed successfully", job.id);
 
                 // Update job to completed via queue URL
                 if let Some(queue_url) = &job.webdav_config.queue_url {
-                    info!("Updating job status to completed at: {}", queue_url);
+                    log_both!(info, "Updating job status to completed at: {}", queue_url);
                     match update_job_status_remote(queue_url, &job.id, JobStatus::Completed, None).await {
-                        Ok(_) => info!("Status update successful"),
-                        Err(e) => error!("Status update failed: {}", e),
+                        Ok(_) => log_both!(info, "Status update successful"),
+                        Err(e) => log_both!(error, "Status update failed: {}", e),
                     }
                 }
             }
             Err(e) => {
-                error!("Upload FAILED: {}", e);
+                log_both!(error, "Upload FAILED: {}", e);
                 if let Some(queue_url) = &job.webdav_config.queue_url {
                     let _ = update_job_status_remote(queue_url, &job.id, JobStatus::Failed, None).await;
                 }
             }
         }
     } else {
-        error!("FFmpeg FAILED with exit code: {}", output.status);
+        log_both!(error, "FFmpeg FAILED with exit code: {}", status);
 
         if let Some(queue_url) = &job.webdav_config.queue_url {
             let _ = update_job_status_remote(queue_url, &job.id, JobStatus::Failed, None).await;
         }
     }
 
+    // Final flush before cleanup
+    if let Some(ref logger) = rlog {
+        logger.flush().await;
+    }
+
     // Cleanup temp directory
-    info!("Cleaning up temp dir: {}", temp_dir);
+    log_both!(info, "Cleaning up temp dir: {}", temp_dir);
     let _ = fs::remove_dir_all(&temp_dir);
 
-    info!("=== PROCESSING JOB END ===");
+    log_both!(info, "=== PROCESSING JOB END ===");
+
+    // Final flush
+    if let Some(ref logger) = rlog {
+        logger.flush().await;
+    }
+
     Ok(())
 }
 
