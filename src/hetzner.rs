@@ -88,6 +88,13 @@ struct CreateServerRequest {
 #[derive(Debug, Deserialize)]
 struct CreateServerResponse {
     server: Server,
+    root_password: Option<String>,
+}
+
+/// Result of creating a server, includes the server info and root password
+pub struct CreateServerResult {
+    pub server: Server,
+    pub root_password: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -115,7 +122,7 @@ impl HetznerClient {
         }
     }
 
-    pub async fn create_server(&self, config: &ServerConfig) -> Result<Server> {
+    pub async fn create_server(&self, config: &ServerConfig) -> Result<CreateServerResult> {
         let url = format!("{}/servers", HETZNER_API_BASE);
 
         let labels = if config.labels.is_empty() {
@@ -186,7 +193,10 @@ impl HetznerClient {
             result.server.name, result.server.id, result.server.public_net.ipv4.ip
         );
 
-        Ok(result.server)
+        Ok(CreateServerResult {
+            server: result.server,
+            root_password: result.root_password,
+        })
     }
 
     pub async fn delete_server(&self, id: u64) -> Result<()> {
@@ -503,13 +513,19 @@ final_message: "FFmpeg worker is ready!"
     )
 }
 
+/// Result of provisioning a worker
+pub struct ProvisionResult {
+    pub ip: String,
+    pub root_password: Option<String>,
+}
+
 pub async fn provision_worker(
     hetzner_token: &str,
     queue_url: &str,
     binary_url: &str,
     bg_image_url: &str,
     name: Option<String>,
-) -> Result<String> {
+) -> Result<ProvisionResult> {
     let client = HetznerClient::new(hetzner_token.to_string());
 
     let name = name.unwrap_or_else(|| {
@@ -527,6 +543,9 @@ pub async fn provision_worker(
         ..Default::default()
     };
 
-    let server = client.create_server(&config).await?;
-    Ok(server.public_net.ipv4.ip)
+    let result = client.create_server(&config).await?;
+    Ok(ProvisionResult {
+        ip: result.server.public_net.ipv4.ip,
+        root_password: result.root_password,
+    })
 }
