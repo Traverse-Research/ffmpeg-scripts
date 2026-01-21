@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
             let binary_url = format!("{}/assets/worker", base);
             let bg_image_url = format!("{}/assets/gpc-bg.png", base);
 
-            let ip = hetzner::provision_worker(
+            let result = hetzner::provision_worker(
                 &token,
                 &queue_url,
                 &binary_url,
@@ -85,7 +85,10 @@ async fn main() -> Result<()> {
                 name,
             )
             .await?;
-            println!("Worker provisioned at IP: {}", ip);
+            println!("Worker provisioned at IP: {}", result.ip);
+            if let Some(password) = result.root_password {
+                println!("Root password: {}", password);
+            }
         }
         Commands::ListServers { token } => {
             let client = hetzner::HetznerClient::new(token);
