@@ -112,22 +112,24 @@ def upload_directory(local_dir: str, remote_dir: str, webdav_url: str, username:
     return success, failed
 
 
+WEBDAV_URL = "https://nx73934.your-storageshare.de/remote.php/webdav/"
+WEBDAV_USER = "jasper"
+WEBDAV_PASS = "ypp=UL2!mwBM7!Q"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Upload a directory to WebDAV server")
     parser.add_argument("local_dir", help="Local directory to upload")
     parser.add_argument("remote_dir", help="Remote directory (e.g., /processed)")
-    parser.add_argument("--url", required=True, help="WebDAV URL")
-    parser.add_argument("--user", required=True, help="Username")
-    parser.add_argument("--pass", dest="password", required=True, help="Password")
 
     args = parser.parse_args()
 
     success, failed = upload_directory(
         args.local_dir,
         args.remote_dir,
-        args.url,
-        args.user,
-        args.password
+        WEBDAV_URL,
+        WEBDAV_USER,
+        WEBDAV_PASS
     )
 
     print()
