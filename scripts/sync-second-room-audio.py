@@ -25,6 +25,7 @@ from scipy import signal as sig
 # Configuration
 TAGS_FILE = os.path.expanduser("~/videos/quadrant-tags.json")
 AUDIO_DIR = os.path.expanduser("~/downloads/Second Room Recordings/Audio")
+PROCESSED_VIDEO_DIR = os.path.expanduser("~/videos/take-2")
 OUTPUT_DIR = os.path.expanduser("~/videos/synced")
 
 # Analysis settings
@@ -191,15 +192,16 @@ def main():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i, (name, data) in enumerate(second_room_videos.items(), 1):
-            video_path = data["path"]
+            # Use processed video from take-2 directory (same filename logic as process-videos.py)
+            # Original: "2025-11-18 10-29-29.mov" -> Processed: "2025-11-18 10-29-29.mp4"
+            processed_name = Path(name).stem + ".mp4"
+            video_path = os.path.join(PROCESSED_VIDEO_DIR, processed_name)
+
             print(f"[{i}/{len(second_room_videos)}] {name}")
 
             if not Path(video_path).exists():
-                # Try with home prefix
-                video_path = os.path.expanduser(f"~/{video_path}")
-                if not Path(video_path).exists():
-                    print(f"  Video not found: {video_path}")
-                    continue
+                print(f"  Processed video not found: {video_path}")
+                continue
 
             print(f"  Analyzing audio...")
             best_match, offset, score, _ = find_best_match(video_path, audio_files, tmpdir)
